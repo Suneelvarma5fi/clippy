@@ -1,5 +1,12 @@
 # Clippy
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Next.js 16](https://img.shields.io/badge/Next.js-16-black?logo=next.js)](web/)
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](worker/)
+[![Node 20+](https://img.shields.io/badge/Node-20%2B-339933?logo=node.js&logoColor=white)](web/)
+[![Self-hosted](https://img.shields.io/badge/self--hosted-your%20own%20keys-blue)](docs/SETUP.md)
+[![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Suneelvarma5fi/clippy/pulls)
+
 Turn long YouTube videos into short, captioned, face-tracked clips — on your own machine, with your own API keys.
 
 Paste a YouTube URL. Clippy transcribes it, finds the moments worth clipping, reframes them to portrait around the speaker's face, burns in animated captions, and hands you MP4s ready to post.
