@@ -1,0 +1,13 @@
+-- ============================================================
+-- CLIP ANALYSIS artifact (analysis_ref — ClipSpec v1)
+-- ============================================================
+-- The per-frame face boxes + active-speaker scan from the portrait pass
+-- (_scan_source) is now persisted as a queryable JSON artifact in R2 instead
+-- of being computed and discarded. It is the feedstock for the presence map,
+-- heatmap overlay, auto-placement, and overlap lint.
+--
+-- Keyed to the edit it was produced from: same (clip, aspect_ratio, cuts_hash)
+-- lifecycle as the cached portrait, so a cut/aspect change invalidates both.
+-- Coordinates are in the STITCHED-clip landscape frame (the concatenated cut
+-- ranges fed to the portrait pass), not the original source.
+alter table clip_edits add column if not exists analysis_r2_key text;

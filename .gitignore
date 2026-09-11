@@ -1,0 +1,53 @@
+# ── Secrets — never commit real credentials ──────────────────
+.env
+.env.local
+.env.*.local
+worker/.env
+
+# Keep example files so new devs know what vars are needed
+!.env.example
+!.env.local.example
+!worker/.env.example
+
+# ── Node / Next.js ────────────────────────────────────────────
+node_modules/
+web/node_modules/
+web/.next/
+web/out/
+web/.vercel/
+web/tsconfig.tsbuildinfo
+
+# ── Logs ──────────────────────────────────────────────────────
+*.log
+
+# ── Supabase CLI scratch ──────────────────────────────────────
+supabase/.temp/
+
+# ── Python / Worker ───────────────────────────────────────────
+worker/.venv/
+worker/__pycache__/
+worker/**/__pycache__/
+worker/**/*.pyc
+worker/**/*.pyo
+*.pyc
+*.pyo
+__pycache__/
+
+# ── Media / temp files ────────────────────────────────────────
+*.mp4
+*.mp3
+*.wav
+*.webm
+downloads/
+temp/
+tmp/
+
+# ── OS ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Editor ────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo

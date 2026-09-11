@@ -1,0 +1,19 @@
+# Runs the Python worker in a container. This is the supported path on
+# Windows, where the worker's native dependencies (ffmpeg, Chrome for
+# HyperFrames captions, InsightFace's C++ build) are painful to install.
+#
+# The Next.js app is plain Node and runs natively on every platform:
+#
+#   cp worker/.env.example worker/.env      # fill in your keys
+#   docker compose up --build               # worker on http://127.0.0.1:8000
+#   cd web && npm install && npm run dev    # web on http://localhost:3000
+#
+# The first build downloads Chrome and the ML models and takes a while.
+
+services:
+  worker:
+    build: ./worker
+    env_file: ./worker/.env
+    ports:
+      - "8000:8000"
+    restart: unless-stopped

@@ -1,0 +1,126 @@
+@import "tailwindcss";
+
+:root {
+  --yt-bg:            #0f0f0f;
+  --yt-surface:       #212121;
+  --yt-surface-2:     #272727;
+  --yt-border:        rgba(255,255,255,0.07);
+  --yt-border-strong: rgba(255,255,255,0.12);
+  --yt-hover:         #3f3f3f;
+  --yt-text:          #f1f1f1;
+  --yt-text-2:        #aaaaaa;
+  --yt-red:           #ff0000;
+  --yt-red-hover:     #cc0000;
+}
+
+body {
+  background: var(--yt-bg);
+  color: var(--yt-text);
+}
+
+/* Hide scrollbar utility */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* Visible keyboard focus ring on interactive elements (mouse clicks stay clean
+   via :focus-visible). Inputs/textareas keep their own ring styles. */
+a:focus-visible,
+button:focus-visible,
+select:focus-visible,
+summary:focus-visible,
+[role="button"]:focus-visible,
+[tabindex]:not([tabindex="-1"]):focus-visible {
+  outline: 2px solid var(--yt-text);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+input:focus-visible,
+textarea:focus-visible { outline: none; }
+
+/* Respect reduced-motion: neutralize decorative motion (shimmer, pulse, hover
+   scale, long transitions). Spinners are kept — they convey loading state. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+  .animate-spin {
+    animation-duration: 0.8s !important;
+    animation-iteration-count: infinite !important;
+  }
+}
+
+/* Custom range slider */
+input[type="range"] {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 3px;
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+  background: var(--yt-border);
+  transition: background 0.08s linear;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+  transition: transform 0.12s ease, box-shadow 0.12s ease;
+}
+input[type="range"]:hover::-webkit-slider-thumb,
+input[type="range"]:focus::-webkit-slider-thumb {
+  transform: scale(1.25);
+  box-shadow: 0 1px 6px rgba(0,0,0,0.6), 0 0 0 3px rgba(255,255,255,0.1);
+}
+input[type="range"]:active::-webkit-slider-thumb {
+  transform: scale(1.1);
+}
+input[type="range"]::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border: none;
+  border-radius: 50%;
+  background: #fff;
+  cursor: pointer;
+}
+
+/* Hide number input spinners */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button { -webkit-appearance: none; }
+input[type="number"] { -moz-appearance: textfield; }
+
+/* Hide unwanted native video control buttons */
+video::-webkit-media-controls-fullscreen-button    { display: none !important; }
+video::-webkit-media-controls-play-button          { display: none !important; }
+video::-webkit-media-controls-overlay-play-button  { display: none !important; }
+
+/* Scrollbar — YouTube style */
+::-webkit-scrollbar        { width: 8px; height: 8px; }
+::-webkit-scrollbar-track  { background: transparent; }
+::-webkit-scrollbar-thumb  { background: var(--yt-border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #606060; }
+
+/* Diagonal light strip sweeping across a clip card while its export runs */
+.clip-shimmer {
+  overflow: hidden;
+}
+.clip-shimmer::after {
+  content: "";
+  position: absolute;
+  top: -60%;
+  bottom: -60%;
+  left: 30%;
+  width: 40%;
+  background: linear-gradient(to right, transparent, rgba(255, 255, 255, 0.14), transparent);
+  transform: translateX(-300%) rotate(18deg);
+  animation: clip-shimmer-sweep 1.8s ease-in-out infinite;
+}
+@keyframes clip-shimmer-sweep {
+  from { transform: translateX(-300%) rotate(18deg); }
+  to   { transform: translateX(300%) rotate(18deg); }
+}

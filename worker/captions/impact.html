@@ -1,0 +1,196 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <title>Impact</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Anton&display=swap"
+      rel="stylesheet"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      *, *::before, *::after { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        overflow: hidden;
+        background: transparent;
+      }
+      #cap {
+        pointer-events: none;
+        position: relative;
+        overflow: hidden;
+        background: transparent;
+      }
+      .grp {
+        position: absolute;
+        left: 0;
+        width: 100%;
+        transform: translateY(-50%);
+      }
+      .grp-inner {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: center;
+        gap: 0.22em;
+        padding: 0 5%;
+        opacity: 0;
+        visibility: hidden;
+      }
+      .word {
+        font-family: "Anton", sans-serif;
+        font-weight: 400;
+        text-transform: uppercase;
+        display: inline-block;
+        letter-spacing: 0.015em;
+        line-height: 1.12;
+        position: relative;
+        transform-origin: 50% 60%;
+        will-change: transform;
+      }
+      /* Thick outline rendered by a duplicate glyph layer behind the fill —
+         -webkit-text-stroke on the element itself would eat into the fill. */
+      .word::before {
+        content: attr(data-text);
+        position: absolute;
+        inset: 0;
+        z-index: -1;
+        color: transparent;
+        -webkit-text-stroke: var(--sw, 10px) var(--cap-stroke, #000000);
+        text-shadow: 0 6px 22px rgba(0, 0, 0, 0.55);
+      }
+    </style>
+  </head>
+  <body>
+    <div
+      id="cap"
+      data-composition-id="caption"
+      data-timeline-locked
+      data-start="0"
+      data-duration="8"
+      data-fps="30"
+      data-width="1080"
+      data-height="1920"
+    >
+      <div id="cap-container"></div>
+    </div>
+
+    <script>
+      (function () {
+        window.__timelines = window.__timelines || {};
+
+        var WORDS = [
+          { text: "Stop", start: 0.0, end: 0.35 },
+          { text: "scrolling.", start: 0.35, end: 0.9 },
+          { text: "This", start: 1.05, end: 1.3 },
+          { text: "changes", start: 1.3, end: 1.75 },
+          { text: "everything.", start: 1.75, end: 2.4 },
+        ];
+
+        var RAW_GROUPS = [
+          [0, 1],
+          [2, 4],
+        ];
+
+        var CFG = {};
+
+        var root = document.getElementById("cap");
+        var W = parseInt(root.getAttribute("data-width"), 10) || 1080;
+        var H = parseInt(root.getAttribute("data-height"), 10) || 1920;
+        var DUR = parseFloat(root.getAttribute("data-duration")) || 8;
+        [document.documentElement, document.body, root].forEach(function (el) {
+          el.style.width = W + "px";
+          el.style.height = H + "px";
+        });
+
+        var ACCENT = CFG.accent || "#ffdd00";
+        var TEXT = CFG.text || "#ffffff";
+        var STROKE = CFG.stroke || "#000000";
+        var SCALE = CFG.fontScale || 1;
+        var Y_PCT = CFG.yPct == null ? 80 : CFG.yPct;
+        document.documentElement.style.setProperty("--cap-stroke", STROKE);
+
+        var _c = document.createElement("canvas").getContext("2d");
+        function fitFontSize(text, base, weight, family, maxWidth) {
+          var size = base;
+          var minSize = Math.floor(base * 0.45);
+          while (size > minSize) {
+            _c.font = weight + " " + size + "px " + family;
+            if (_c.measureText(text).width <= maxWidth) return size;
+            size -= 2;
+          }
+          return minSize;
+        }
+
+        var BASE_SIZE = Math.round(72 * (W / 1080) * SCALE);
+        var MAX_W = W * 0.84;
+
+        var GROUPS = RAW_GROUPS.map(function (pair, gi) {
+          var nextStart = gi + 1 < RAW_GROUPS.length ? WORDS[RAW_GROUPS[gi + 1][0]].start : DUR;
+          var gEnd = Math.min(WORDS[pair[1]].end + 0.5, nextStart - 0.05, DUR);
+          gEnd = Math.max(gEnd, WORDS[pair[0]].start + 0.2);
+          return { ws: pair[0], we: pair[1], start: WORDS[pair[0]].start, end: gEnd };
+        });
+
+        var container = document.getElementById("cap-container");
+        var tl = gsap.timeline({ paused: true });
+
+        GROUPS.forEach(function (g, gi) {
+          var groupWords = WORDS.slice(g.ws, g.we + 1);
+          var grp = document.createElement("div");
+          grp.className = "grp";
+          grp.style.top = Y_PCT + "%";
+
+          var inner = document.createElement("div");
+          inner.className = "grp-inner";
+          grp.appendChild(inner);
+
+          var groupText = groupWords.map(function (w) { return w.text.toUpperCase(); }).join(" ");
+          var size = fitFontSize(groupText, BASE_SIZE, "400", "Anton", MAX_W);
+          inner.style.fontSize = size + "px";   // em-based flex gap scales with word size
+
+          groupWords.forEach(function (w, i) {
+            var wi = g.ws + i;
+            var wordEl = document.createElement("span");
+            wordEl.className = "word";
+            wordEl.id = "w-" + wi;
+            wordEl.style.fontSize = size + "px";
+            wordEl.style.color = TEXT;
+            wordEl.style.setProperty("--sw", Math.max(6, Math.round(size * 0.15)) + "px");
+            wordEl.dataset.text = w.text.toUpperCase();
+
+            var textEl = document.createElement("span");
+            textEl.textContent = w.text.toUpperCase();
+            wordEl.appendChild(textEl);
+            inner.appendChild(wordEl);
+          });
+
+          container.appendChild(grp);
+
+          // Hormozi-style hard cut in: near-instant, no float
+          tl.set(inner, { visibility: "visible" }, g.start);
+          tl.fromTo(inner, { opacity: 0, scale: 0.94 }, { opacity: 1, scale: 1, duration: 0.08, ease: "power3.out" }, g.start);
+
+          groupWords.forEach(function (w, i) {
+            var wi = g.ws + i;
+            var wordEl = document.getElementById("w-" + wi);
+
+            tl.to(wordEl, { color: ACCENT, scale: 1.16, duration: 0.09, ease: "power3.out" }, w.start);
+            tl.to(wordEl, { scale: 1.06, duration: 0.12, ease: "power2.out" }, w.start + 0.09);
+            var offAt = Math.min(w.end, g.end - 0.02);
+            tl.to(wordEl, { color: TEXT, scale: 1, duration: 0.1, ease: "power2.in" }, offAt);
+          });
+
+          tl.to(inner, { opacity: 0, duration: 0.08, ease: "power2.in" }, g.end - 0.08);
+          tl.set(inner, { visibility: "hidden" }, g.end);
+        });
+
+        tl.seek(0);
+        window.__timelines["caption"] = tl;
+      })();
+    </script>
+  </body>
+</html>

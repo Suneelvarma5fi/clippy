@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=1080, height=1920" />
+    <title>Pill</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Montserrat:wght@800&display=swap"
+      rel="stylesheet"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/gsap@3.14.2/dist/gsap.min.js"></script>
+    <style>
+      *, *::before, *::after { box-sizing: border-box; }
+      html, body {
+        margin: 0;
+        overflow: hidden;
+        background: transparent;
+      }
+      #cap {
+        pointer-events: none;
+        position: relative;
+        overflow: hidden;
+        background: transparent;
+      }
+      .grp {
+        position: absolute;
+        left: 0;
+        width: 100%;
+        transform: translateY(-50%);
+      }
+      .grp-inner {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: center;
+        gap: 0.14em;
+        padding: 0 6%;
+        opacity: 0;
+        visibility: hidden;
+      }
+      .word {
+        font-family: "Montserrat", sans-serif;
+        font-weight: 800;
+        text-transform: uppercase;
+        display: inline-block;
+        letter-spacing: 0.02em;
+        line-height: 1.15;
+        position: relative;
+        padding: 0.1em 0.22em 0.14em;
+        text-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+        transform-origin: 50% 58%;
+        will-change: transform, filter;
+      }
+      .word-bg {
+        position: absolute;
+        inset: 0;
+        opacity: 0;
+        transform: scaleX(0);
+        transform-origin: 0% 50%;
+        z-index: -1;
+      }
+      .word-text { position: relative; z-index: 1; }
+    </style>
+  </head>
+  <body>
+    <div
+      id="cap"
+      data-composition-id="caption"
+      data-timeline-locked
+      data-start="0"
+      data-duration="8"
+      data-fps="30"
+      data-width="1080"
+      data-height="1920"
+    >
+      <div id="cap-container"></div>
+    </div>
+
+    <script>
+      (function () {
+        window.__timelines = window.__timelines || {};
+
+        var WORDS = [
+          { text: "Captions", start: 0.0, end: 0.45 },
+          { text: "that", start: 0.45, end: 0.65 },
+          { text: "actually", start: 0.65, end: 1.1 },
+          { text: "convert", start: 1.1, end: 1.6 },
+          { text: "start", start: 1.75, end: 2.05 },
+          { text: "with", start: 2.05, end: 2.2 },
+          { text: "the", start: 2.2, end: 2.3 },
+          { text: "right", start: 2.3, end: 2.6 },
+          { text: "style.", start: 2.6, end: 3.1 },
+        ];
+
+        var RAW_GROUPS = [
+          [0, 3],
+          [4, 8],
+        ];
+
+        var CFG = {};
+
+        var root = document.getElementById("cap");
+        var W = parseInt(root.getAttribute("data-width"), 10) || 1080;
+        var H = parseInt(root.getAttribute("data-height"), 10) || 1920;
+        var DUR = parseFloat(root.getAttribute("data-duration")) || 8;
+        [document.documentElement, document.body, root].forEach(function (el) {
+          el.style.width = W + "px";
+          el.style.height = H + "px";
+        });
+
+        var ACCENT = CFG.accent || "#ff1745";
+        var TEXT = CFG.text || "#ffffff";
+        var SCALE = CFG.fontScale || 1;
+        var Y_PCT = CFG.yPct == null ? 80 : CFG.yPct;
+        var RADIUS = CFG.radius == null ? 10 : CFG.radius;
+        var GLOW = CFG.glow == null ? 30 : CFG.glow;
+
+        function hexToRgba(hex, a) {
+          var h = hex.replace("#", "");
+          if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+          return "rgba(" + parseInt(h.slice(0, 2), 16) + "," + parseInt(h.slice(2, 4), 16) + "," + parseInt(h.slice(4, 6), 16) + "," + a + ")";
+        }
+
+        var _c = document.createElement("canvas").getContext("2d");
+        function fitFontSize(text, base, weight, family, maxWidth) {
+          var size = base;
+          var minSize = Math.floor(base * 0.45);
+          while (size > minSize) {
+            _c.font = weight + " " + size + "px " + family;
+            if (_c.measureText(text).width <= maxWidth) return size;
+            size -= 2;
+          }
+          return minSize;
+        }
+
+        var BASE_SIZE = Math.round(58 * (W / 1080) * SCALE);
+        var MAX_W = W * 0.86;
+        var glowShadow = GLOW > 0 ? "0 10px " + GLOW + "px " + hexToRgba(ACCENT, 0.4) : "none";
+
+        var GROUPS = RAW_GROUPS.map(function (pair, gi) {
+          var nextStart = gi + 1 < RAW_GROUPS.length ? WORDS[RAW_GROUPS[gi + 1][0]].start : DUR;
+          var gEnd = Math.min(WORDS[pair[1]].end + 0.5, nextStart - 0.05, DUR);
+          gEnd = Math.max(gEnd, WORDS[pair[0]].start + 0.2);
+          return { ws: pair[0], we: pair[1], start: WORDS[pair[0]].start, end: gEnd };
+        });
+
+        var container = document.getElementById("cap-container");
+        var tl = gsap.timeline({ paused: true });
+
+        GROUPS.forEach(function (g, gi) {
+          var groupWords = WORDS.slice(g.ws, g.we + 1);
+          var grp = document.createElement("div");
+          grp.className = "grp";
+          grp.style.top = Y_PCT + "%";
+
+          var inner = document.createElement("div");
+          inner.className = "grp-inner";
+          grp.appendChild(inner);
+
+          var groupText = groupWords.map(function (w) { return w.text.toUpperCase(); }).join(" ");
+          var size = fitFontSize(groupText, BASE_SIZE, "800", "Montserrat", MAX_W);
+          inner.style.fontSize = size + "px";   // em-based flex gap scales with word size
+
+          groupWords.forEach(function (w, i) {
+            var wi = g.ws + i;
+            var wordEl = document.createElement("span");
+            wordEl.className = "word";
+            wordEl.id = "w-" + wi;
+            wordEl.style.fontSize = size + "px";
+            wordEl.style.color = TEXT;
+
+            var bgEl = document.createElement("span");
+            bgEl.className = "word-bg";
+            bgEl.id = "bg-" + wi;
+            bgEl.style.background = ACCENT;
+            bgEl.style.borderRadius = RADIUS + "px";
+            bgEl.style.boxShadow = glowShadow;
+
+            var textEl = document.createElement("span");
+            textEl.className = "word-text";
+            textEl.textContent = w.text.toUpperCase();
+
+            wordEl.appendChild(bgEl);
+            wordEl.appendChild(textEl);
+            inner.appendChild(wordEl);
+          });
+
+          container.appendChild(grp);
+
+          tl.set(inner, { visibility: "visible" }, g.start);
+          tl.fromTo(inner, { opacity: 0, y: 14 }, { opacity: 1, y: 0, duration: 0.14, ease: "power2.out" }, g.start);
+
+          groupWords.forEach(function (w, i) {
+            var wi = g.ws + i;
+            var bgEl = document.getElementById("bg-" + wi);
+            var wordEl = document.getElementById("w-" + wi);
+
+            tl.to(bgEl, { opacity: 1, scaleX: 1, duration: 0.15, ease: "power2.out" }, w.start);
+            tl.to(wordEl, { filter: "brightness(1.06)", duration: 0.08, ease: "power2.out" }, w.start);
+            tl.to(wordEl, { filter: "brightness(1)", duration: 0.16, ease: "power2.out" }, w.start + 0.08);
+            tl.to(bgEl, { opacity: 0, scaleX: 1.02, duration: 0.1, ease: "power2.in" }, Math.min(w.end, g.end - 0.02));
+            tl.set(bgEl, { scaleX: 0 }, Math.min(w.end + 0.1, g.end - 0.01));
+          });
+
+          tl.to(inner, { opacity: 0, duration: 0.1, ease: "power2.in" }, g.end - 0.1);
+          tl.set(inner, { visibility: "hidden" }, g.end);
+        });
+
+        tl.seek(0);
+        window.__timelines["caption"] = tl;
+      })();
+    </script>
+  </body>
+</html>
