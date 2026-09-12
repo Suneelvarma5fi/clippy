@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/clippy.gif" width="600" alt="Clippy">
+</p>
+
 # Clippy
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -8,10 +12,6 @@
 [![PRs welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/Suneelvarma5fi/clippy/pulls)
 
 Turn long YouTube videos into short, captioned, face-tracked clips — on your own machine, with your own API keys.
-
-<p align="center">
-  <img src="docs/demo.gif" width="270" alt="A 9:16 clip exported by Clippy: face-tracked reframe with animated captions">
-</p>
 
 Paste a YouTube URL. Clippy transcribes it, finds the moments worth clipping, reframes them to portrait around the speaker's face, burns in animated captions, and hands you MP4s ready to post.
 
