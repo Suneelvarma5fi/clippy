@@ -36,7 +36,7 @@ Four accounts. Only the last two cost money, and only when you process a video.
 | [OpenRouter](https://openrouter.ai) | Clip identification, social copy | Pay per use |
 | [Replicate](https://replicate.com) | WhisperX transcription (GPU) | Pay per use |
 
-Locally: **Node 20+**, **Python 3.12**, **ffmpeg**. On Windows, run the worker in Docker (`docker compose up`) instead of installing its native dependencies.
+Locally: **Node 20+**, **Python 3.12**, **ffmpeg**. On Windows, run the worker in Docker (`docker compose up`) instead of installing its native dependencies — see [Known limitations](#known-limitations).
 
 Clippy runs on your machine but is not offline — it needs those services.
 
@@ -68,6 +68,17 @@ cd web && npm install && npm run dev      # http://localhost:3000
 ```
 
 The worker refuses to start if any required variable or binary is missing and tells you exactly which.
+
+## Known limitations
+
+Worth reading before you rely on it.
+
+- **Face tracking is audio-driven.** Who's on screen is decided by *who is speaking* (diarisation) plus face recognition to find that person. It does not watch mouths. So it can miss the speaker when recognition is weak — a face in near-profile, or heavy blur — and it can't help solo narration over B-roll, where the speaker is never on screen. It works best on interviews, podcasts and panels with consistent participants. The obvious next improvement is a visual mouth-movement signal from InsightFace's landmark model; contributions welcome.
+- **Speaker-aware tracking needs `HUGGINGFACE_TOKEN`.** Without it there's no diarisation, and the tracker falls back to following the largest face.
+- **Storage must allow large files.** Cloudflare R2 is the documented default. Supabase Storage works only on the Pro plan — its free plan caps files at 50 MB, and a source video is hundreds of MB.
+- **Sources are kept at YouTube's best quality** (often 4K, ~800 MB per 20 minutes) because the portrait crop is cut from them. That's ~a dozen videos on R2's free 10 GB; delete finished ones from the Library, or enable `DAILY_CLEANUP_ENABLED`.
+- **Windows runs the worker in Docker.** The image builds ffmpeg, Node, a headless Chrome and the ML stack, and hasn't yet been built by the maintainers on a Windows machine — if you're first, please open an issue with the result either way.
+- **"weak" clips.** Moments the Scout flagged but the Crafter couldn't make self-contained are kept and labelled `weak`, with the reason on hover, rather than hidden. Expect several per video; they're there for you to judge.
 
 ## Architecture
 
