@@ -73,8 +73,8 @@ The worker refuses to start if any required variable or binary is missing and te
 
 Worth reading before you rely on it.
 
-- **Face tracking is audio-driven.** Who's on screen is decided by *who is speaking* (diarisation) plus face recognition to find that person. It does not watch mouths. So it can miss the speaker when recognition is weak — a face in near-profile, or heavy blur — and it can't help solo narration over B-roll, where the speaker is never on screen. It works best on interviews, podcasts and panels with consistent participants. The obvious next improvement is a visual mouth-movement signal from InsightFace's landmark model; contributions welcome.
-- **Speaker-aware tracking needs `HUGGINGFACE_TOKEN`.** Without it there's no diarisation, and the tracker falls back to following the largest face.
+- **Face tracking combines three signals:** who is speaking (diarisation), which face that is (recognition, learned once per video), and whose mouth is moving (landmarks). Audio + identity take precedence; mouth movement decides when they can't — a face in profile, or no diarisation at all. It works best on interviews, podcasts and panels. It can't help solo narration over B-roll, where the speaker is never on screen, and a hand or mic over the mouth removes the visual signal.
+- **Without `HUGGINGFACE_TOKEN`** there's no diarisation, so tracking follows whoever's mouth is moving — good in a two-shot, but with several people talking at once it will pick one.
 - **Storage must allow large files.** Cloudflare R2 is the documented default. Supabase Storage works only on the Pro plan — its free plan caps files at 50 MB, and a source video is hundreds of MB.
 - **Sources are kept at YouTube's best quality** (often 4K, ~800 MB per 20 minutes) because the portrait crop is cut from them. That's ~a dozen videos on R2's free 10 GB; delete finished ones from the Library, or enable `DAILY_CLEANUP_ENABLED`.
 - **Windows runs the worker in Docker.** The image builds ffmpeg, Node, a headless Chrome and the ML stack, and hasn't yet been built by the maintainers on a Windows machine — if you're first, please open an issue with the result either way.

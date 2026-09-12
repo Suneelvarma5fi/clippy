@@ -89,7 +89,7 @@ def _get_face_app():
     global _face_app
     if _face_app is None:
         from insightface.app import FaceAnalysis
-        _face_app = FaceAnalysis(allowed_modules=["detection", "recognition"])
+        _face_app = FaceAnalysis(allowed_modules=["detection", "recognition", "landmark_2d_106"])
         _face_app.prepare(ctx_id=0, det_size=(320, 320))
     return _face_app
 
@@ -186,23 +186,84 @@ def _cos_sim(a: np.ndarray, b: np.ndarray) -> float:
 
 # ── Pass 1: scan full source ──────────────────────────────────────────────────
 
+# ── Mouth movement ────────────────────────────────────────────────────────────
+# InsightFace's 106-point layout: the outer upper-lip arc and outer lower-lip
+# arc. Openness is the vertical gap between them over face height; it's the
+# CHANGE in openness over time that says "talking", so the closed-mouth
+# baseline (lip thickness) doesn't matter and inner-lip indices aren't needed.
+MOUTH_UPPER = [64, 63, 71, 67, 68]
+MOUTH_LOWER = [55, 56, 53, 59, 58]
+TALK_WINDOW_S = 1.0    # trailing window over which mouth activity is measured
+TALK_MIN      = 0.006  # activity below this is a still mouth (measured: listener ≈0.002, speaker ≈0.02)
+TRACK_IOU     = 0.3    # same face across consecutive scan frames
+
+
+def _mouth_openness(face) -> float | None:
+    lm = getattr(face, "landmark_2d_106", None)
+    if lm is None:
+        return None
+    fh = float(face.bbox[3] - face.bbox[1])
+    if fh <= 0:
+        return None
+    return float(lm[MOUTH_LOWER, 1].mean() - lm[MOUTH_UPPER, 1].mean()) / fh
+
+
+def _iou(a: list, b: list) -> float:
+    ix = max(0, min(a[2], b[2]) - max(a[0], b[0])); iy = max(0, min(a[3], b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _mouth_activity(records: list[dict], window_s: float = TALK_WINDOW_S) -> None:
+    """
+    Set face["talk"] on every scanned face: mean |Δ openness| over the trailing
+    window along that face's track (faces matched frame-to-frame by IoU).
+    None when the face has fewer than two samples in the window or no
+    landmarks. Relative comparison between faces in the same frame is the
+    robust use; TALK_MIN is only a noise floor.
+    """
+    tracks: list[dict] = []   # {"bbox": last bbox, "hist": [(t, openness)]}
+    for r in records:
+        t = r["t"]
+        used: set[int] = set()
+        for f in r["faces"]:
+            best, best_iou = None, TRACK_IOU
+            for i, tr in enumerate(tracks):
+                if i in used:
+                    continue
+                v = _iou(f["bbox"], tr["bbox"])
+                if v >= best_iou:
+                    best, best_iou = i, v
+            if best is None:
+                tracks.append({"bbox": f["bbox"], "hist": []}); best = len(tracks) - 1
+            used.add(best)
+            tr = tracks[best]
+            tr["bbox"] = f["bbox"]
+            if f.get("mouth") is not None:
+                tr["hist"].append((t, f["mouth"]))
+            tr["hist"] = [(tt, m) for tt, m in tr["hist"] if t - tt <= window_s]
+            vals = [m for _, m in tr["hist"]]
+            f["talk"] = float(np.abs(np.diff(vals)).mean()) if len(vals) >= 2 else None
+        # tracks unmatched this frame keep their history until it ages out
+        tracks = [tr for i, tr in enumerate(tracks) if i in used or (tr["hist"] and t - tr["hist"][-1][0] <= window_s)]
+
+
 def _scan_source(
     source: str,
     src_w: int,
     src_h: int,
     diar_timeline: list,
     fps: float = SCAN_FPS,
-    keyframes_only: bool = False,
+    start: float = 0.0,
+    duration: float | None = None,
 ) -> list[dict]:
     """
-    Pipe the entire source at `fps` and run InsightFace on every frame.
-    Returns per-frame records: [{t, active_speaker, overlap, faces: [...]}].
-    All coordinates are in original source resolution.
-
-    keyframes_only decodes just the I-frames (an order of magnitude cheaper on
-    a long 4K source) and skips frames identical to the previous one, so the
-    fps filter's hold-frames don't cost InsightFace time. Good enough for
-    learning who's who; not for per-frame tracking.
+    Pipe the source (or the window [start, start+duration]) at `fps` and run
+    InsightFace on every frame. Returns per-frame records
+    [{t, active_speaker, overlap, faces: [...]}] with t in source seconds and
+    all coordinates in original source resolution. Mouth activity is
+    attached to every face before returning (see _mouth_activity).
     """
     scale  = SCAN_W / src_w
     scan_h = int(src_h * scale)
@@ -211,7 +272,10 @@ def _scan_source(
     face_app = _get_face_app()
 
     cmd = [
-        "ffmpeg", *(["-skip_frame", "nokey"] if keyframes_only else []), "-i", source,
+        "ffmpeg",
+        *(["-ss", f"{start:.3f}"] if start > 0 else []),
+        "-i", source,
+        *(["-t", f"{duration:.3f}"] if duration is not None else []),
         "-vf", f"scale={SCAN_W}:{scan_h},fps={fps}",
         "-f", "rawvideo", "-pix_fmt", "bgr24", "-an", "pipe:1",
     ]
@@ -220,18 +284,13 @@ def _scan_source(
 
     records: list[dict] = []
     frame_idx = 0
-    prev_raw: bytes | None = None
     try:
         while True:
             raw = proc.stdout.read(fsize)
             if len(raw) < fsize:
                 break
-            t = frame_idx / fps
+            t = start + frame_idx / fps
             frame_idx += 1
-            if keyframes_only:
-                if raw == prev_raw:
-                    continue          # fps filter held the same keyframe — nothing new to learn
-                prev_raw = raw
             frame = np.frombuffer(raw, dtype=np.uint8).reshape(scan_h, SCAN_W, 3)
 
             # InsightFace expects BGR (cv2 convention) — frame is already bgr24
@@ -249,6 +308,7 @@ def _scan_source(
                     "cy":         int((y1 + fh_s / 2) / scale),
                     "fw":         int(fw_s / scale),
                     "fh":         int(fh_s / scale),
+                    "mouth":      _mouth_openness(face),
                 })
 
             speaker, overlap = sweep.at(t)
@@ -271,7 +331,8 @@ def _scan_source(
             proc.kill()
             proc.wait()
 
-    log.info("Scanned %d frames from %s", frame_idx, source)
+    _mouth_activity(records)
+    log.debug("Scanned %d frames from %s", frame_idx, source)
     return records
 
 
@@ -283,14 +344,26 @@ def _bind_speakers(
 ) -> dict[str, np.ndarray | None]:
     """
     Returns {speaker_id: mean_embedding | None}.
-    Aggregates embeddings across ALL clean segments per speaker
-    (>SPEAKER_MIN_DUR, single face, no overlap) — one mislabelled
-    diarisation segment can no longer poison the binding.
+
+    Audio picks the time window (diarisation segments > SPEAKER_MIN_DUR, no
+    overlap); video picks the face within it. In frames where mouth activity
+    is measurable, each face's embedding is weighted by its share of the
+    mouth movement in that frame — a listener's still face contributes ~0
+    even in a solo reaction shot, and the speaker is found in two-shots
+    where single-face frames never occur. Frames with no measurable
+    movement fall back to the old rule: count the face only if it's alone.
     """
     times = [r["t"] for r in records]
-    sums:   dict[str, np.ndarray] = {}
-    counts: dict[str, int]        = {}
-    bound:  dict[str, np.ndarray | None] = {}
+    sums:    dict[str, np.ndarray] = {}
+    weights: dict[str, float]      = {}
+    bound:   dict[str, np.ndarray | None] = {}
+
+    def add(speaker: str, emb: list, w: float) -> None:
+        vec = np.array(emb) * w
+        if speaker in sums:
+            sums[speaker] += vec; weights[speaker] += w
+        else:
+            sums[speaker] = vec; weights[speaker] = w
 
     for start, end, speaker in diar_timeline:
         bound.setdefault(speaker, None)
@@ -299,25 +372,47 @@ def _bind_speakers(
         lo = bisect_left(times, start)
         hi = bisect_left(times, end)
         for r in records[lo:hi]:
-            if r["overlap"] or len(r["faces"]) != 1:
+            if r["overlap"]:
                 continue
-            emb = r["faces"][0]["embedding"]
-            if emb is None:
+            faces = [f for f in r["faces"] if f.get("embedding") is not None]
+            if not faces:
                 continue
-            vec = np.array(emb)
-            if speaker in sums:
-                sums[speaker] += vec
-                counts[speaker] += 1
-            else:
-                sums[speaker] = vec.copy()
-                counts[speaker] = 1
+            talk = [f.get("talk") for f in faces]
+            total = sum(v for v in talk if v is not None)
+            if any(v is not None and v >= TALK_MIN for v in talk):
+                for f, v in zip(faces, talk):
+                    if v:
+                        add(speaker, f["embedding"], v / total)
+            elif len(faces) == 1:
+                add(speaker, faces[0]["embedding"], 1.0)
 
     for speaker, total in sums.items():
-        bound[speaker] = total / counts[speaker]
+        bound[speaker] = total / weights[speaker]
     return bound
 
 
-BIND_SCAN_FPS = 1.0   # keyframe-only pass over the whole source for speaker→face binding
+SPEAKER_FACES_VERSION = 2   # bump when the binding method changes; stale stored maps are rebuilt
+BIND_BURST_S        = 1.5   # seconds sampled per burst — enough for mouth activity at SCAN_FPS
+BIND_BURSTS_PER_SPK = 30    # bursts per speaker, spread across their segments
+
+
+def _burst_windows(diar_timeline: list, per_speaker: int = BIND_BURSTS_PER_SPK,
+                   burst_s: float = BIND_BURST_S) -> list[tuple[float, float]]:
+    """Up to `per_speaker` windows per speaker, evenly spread over that
+    speaker's longer segments, each centred in its segment. Sorted by start."""
+    by_spk: dict[str, list[tuple[float, float]]] = {}
+    for start, end, spk in diar_timeline:
+        if end - start >= max(SPEAKER_MIN_DUR, burst_s):
+            by_spk.setdefault(spk, []).append((start, end))
+    windows: list[tuple[float, float]] = []
+    for segs in by_spk.values():
+        segs.sort()
+        step = max(1, len(segs) / per_speaker)
+        picked = [segs[int(i * step)] for i in range(min(per_speaker, len(segs)))]
+        for start, end in picked:
+            mid = (start + end) / 2
+            windows.append((max(0.0, mid - burst_s / 2), burst_s))
+    return sorted(set(windows))
 
 
 def bind_speakers_from_source(
@@ -327,19 +422,22 @@ def bind_speakers_from_source(
     Learn which face belongs to each diarised speaker from the WHOLE source.
 
     Binding from a single clip is fooled by the first reaction shot: the
-    editor cuts to the listener while the speaker talks, and the only
-    single-face frames in a 30 s clip are exactly those cutaways. Over a
-    full episode the speaker's own shots outnumber the cutaways, so the mean
-    embedding lands on the right person. Runs once per video (transcribe
-    time, source already local); the result is stored beside the source and
-    fed to every export via `speaker_faces`.
+    editor cuts to the listener while the speaker talks. Here we sample
+    short bursts inside each speaker's own segments across the full episode
+    and weight faces by mouth movement (see _bind_speakers), so the person
+    actually talking wins even in two-shots and solo cutaways. Runs once per
+    video (transcribe time, source already local); the result is stored
+    beside the source and fed to every export via `speaker_faces`.
 
-    Returns {speaker_id: 512-d embedding as a list} for speakers that got a
-    binding; JSON-serialisable.
+    Returns {"version": SPEAKER_FACES_VERSION, "speakers": {speaker_id:
+    512-d embedding as a list}} for speakers that got a binding;
+    JSON-serialisable.
     """
     _, src_w, src_h = _video_meta(source_path)
-    records = _scan_source(source_path, src_w, src_h, diar_timeline,
-                           fps=BIND_SCAN_FPS, keyframes_only=True)
+    records: list[dict] = []
+    for start, dur in _burst_windows(diar_timeline):
+        records.extend(_scan_source(source_path, src_w, src_h, diar_timeline, start=start, duration=dur))
+    records.sort(key=lambda r: r["t"])
     bound = _bind_speakers(records, diar_timeline)
     out = {spk: vec.tolist() for spk, vec in bound.items() if vec is not None}
 
@@ -352,17 +450,19 @@ def bind_speakers_from_source(
                 log.warning("Speaker binding ambiguous: %s and %s map to the same face (cos %.2f)", a, b, sim)
     log.info("Speaker→face binding from %d scanned frames: %s", len(records),
              {k: "bound" for k in out} or "none")
-    return out
+    return {"version": SPEAKER_FACES_VERSION, "speakers": out}
 
 
 def _merge_bindings(
-    local: dict[str, np.ndarray | None], preloaded: dict[str, list[float]] | None,
+    local: dict[str, np.ndarray | None], preloaded: dict | None,
 ) -> dict[str, np.ndarray | None]:
-    """Whole-video bindings override clip-local ones; local fills any gaps."""
-    if not preloaded:
+    """Whole-video bindings override clip-local ones; local fills any gaps.
+    Accepts the stored map ({"version", "speakers"}) or a bare speaker dict."""
+    speakers = (preloaded or {}).get("speakers", preloaded) if preloaded else None
+    if not speakers:
         return local
     merged = dict(local)
-    for spk, vec in preloaded.items():
+    for spk, vec in speakers.items():
         merged[spk] = np.array(vec, dtype=float)
     return merged
 
@@ -589,20 +689,27 @@ def _best_face_for_speaker(
     someone else is ruled out even if it happens to resemble the speaker more
     than an unrecognisable one does. Preference order —
       1. confidently the speaker (highest sim first)
-      2. unidentified (largest first) — a profile view of the speaker looks like this
+      2. unidentified — a profile view of the speaker looks like this; among
+         these, the mouth that's moving, then the largest
       3. confidently another speaker (last resort, so a solo shot still tracks)
+    With no binding for the speaker (or no diarisation at all), follow the
+    mouth that's moving; if none is, the largest face as before.
     """
     ref = bound.get(speaker) if speaker else None
     if ref is None:
+        talking = [f for f in faces if (f.get("talk") or 0.0) >= TALK_MIN]
+        if talking:
+            return max(talking, key=lambda f: f["talk"])
         return max(faces, key=lambda f: f["fw"] * f["fh"])
 
-    def rank(f: dict) -> tuple[int, float]:
+    def rank(f: dict) -> tuple[int, float, float]:
         who, sim = _identify(f, bound)
         if who == speaker:
-            return (2, sim)
+            return (2, sim, 0.0)
         if who is None:
-            return (1, float(f["fw"] * f["fh"]))
-        return (0, sim)
+            talk = f.get("talk") or 0.0
+            return (1, talk if talk >= TALK_MIN else 0.0, float(f["fw"] * f["fh"]))
+        return (0, sim, 0.0)
 
     return max(faces, key=rank)
 
@@ -641,11 +748,23 @@ def _build_timeline(
 
     per_frame: list[tuple[float, str, dict | None, list | None]] = []
 
-    for rec in records:
+    def _overlaps(a: list[dict], b: list[dict]) -> bool:
+        return any(_iou(x["bbox"], y["bbox"]) >= TRACK_IOU for x in a for y in b)
+
+    prev_faces: list[dict] = []   # last frame's raw detections, for shot-change detection
+    for idx, rec in enumerate(records):
         t       = rec["t"]
         faces   = rec["faces"]
         active  = rec["active_speaker"]
         overlap = rec["overlap"]
+        # Shot change: nothing in this frame overlaps the last frame, AND the
+        # new layout persists into the next frame. A single-frame detection
+        # blink fails the second test and is still treated as a blink.
+        next_faces = records[idx + 1]["faces"] if idx + 1 < len(records) else faces
+        shot_changed = (bool(prev_faces) and bool(faces)
+                        and not _overlaps(faces, prev_faces)
+                        and _overlaps(faces, next_faces))
+        prev_faces = faces
 
         # Only main-cast faces drive framing: a transient face-like detection
         # must not occupy a panel or force split mode (n is counted after).
@@ -747,12 +866,16 @@ def _build_timeline(
         # But never hold a crop that was itself someone else: that's how a
         # listener's cutaway pinned the whole clip on the listener while the
         # speaker sat in profile, unrecognised, one face over.
+        # A detection blink leaves the newly picked face overlapping something
+        # that was on screen a frame ago; a real shot change doesn't. Never
+        # hold across a shot change — it paints the old crop over new footage.
         following = current_speaker or active
         leaving_speaker_for_other = (
             ref is not None and best.get("embedding") is not None
             and _identify(best, bound)[0] != following
             and last_face is not None and last_face.get("embedding") is not None
             and _identify(last_face, bound)[0] == following
+            and not shot_changed
         )
         if (leaving_speaker_for_other
                 and single_run >= 2
@@ -768,7 +891,11 @@ def _build_timeline(
                       and _cos_sim(np.array(f["embedding"]), last_emb) >= 0.45]
             if sticky:
                 followed = max(sticky, key=lambda f: f["fh"])
-                if best is not followed and best["fh"] < 1.3 * followed["fh"]:
+                # ...but a mouth that is clearly the one moving wins over
+                # stickiness: that's the whole point of following the talker.
+                best_talk, kept_talk = best.get("talk") or 0.0, followed.get("talk") or 0.0
+                talk_decisive = best_talk >= TALK_MIN and best_talk > 2 * kept_talk
+                if best is not followed and best["fh"] < 1.3 * followed["fh"] and not talk_decisive:
                     best = followed
         last_face, last_face_t = best, t
         single_run += 1
@@ -878,7 +1005,7 @@ def _build_timeline(
 
 # ── Pass 1 entry point (with cache) ───────────────────────────────────────────
 
-_CACHE_VERSION = 6  # bump when algorithm changes to invalidate stale caches
+_CACHE_VERSION = 7  # bump when algorithm changes to invalidate stale caches
 
 def _cache_path(source: str) -> str:
     return source + ".portrait_timeline.json"
@@ -900,7 +1027,7 @@ def _cache_params(crop_w: int, crop_h: int) -> dict:
     }
 
 
-ANALYSIS_VERSION = 2  # bump when the persisted analysis artifact format changes
+ANALYSIS_VERSION = 3  # bump when the persisted analysis artifact format changes
 
 
 def _slim_records(records: list[dict]) -> list[dict]:
@@ -914,7 +1041,8 @@ def _slim_records(records: list[dict]) -> list[dict]:
             "active_speaker": r["active_speaker"],
             "overlap":        r["overlap"],
             "faces":          [
-                {"bbox": f["bbox"], "cx": f["cx"], "cy": f["cy"], "fw": f["fw"], "fh": f["fh"]}
+                {"bbox": f["bbox"], "cx": f["cx"], "cy": f["cy"], "fw": f["fw"], "fh": f["fh"],
+                 "mouth": f.get("mouth"), "talk": f.get("talk")}
                 for f in r["faces"]
             ],
         }

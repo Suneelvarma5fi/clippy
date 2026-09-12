@@ -283,7 +283,7 @@ async def handle_transcribe(job: dict) -> None:
                 diar_tl = _build_diar_timeline(transcript)
                 if diar_tl:
                     faces = await asyncio.to_thread(bind_speakers_from_source, source_local, diar_tl)
-                    if faces:
+                    if faces.get("speakers"):
                         await asyncio.to_thread(
                             upload_bytes, json.dumps(faces).encode(),
                             speaker_faces_key(video_id), "application/json",

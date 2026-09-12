@@ -357,37 +357,127 @@ def test_portrait_merge_bindings_prefers_whole_video_map():
     assert merged["SPEAKER_03"] is None
     assert merged["SPEAKER_09"].tolist() == [0.5, 0.5]
     assert _merge_bindings(local, None) is local
+    # the stored-file shape ({"version", "speakers"}) is accepted too
+    wrapped = _merge_bindings(local, {"version": 2, "speakers": {"SPEAKER_01": [0.0, 1.0]}})
+    assert wrapped["SPEAKER_01"].tolist() == [0.0, 1.0]
+    assert _merge_bindings(local, {"version": 2, "speakers": {}}) is local
 
 
-def test_portrait_keyframe_scan_skips_held_frames():
-    """With keyframes_only the fps filter repeats each keyframe; identical raw
-    frames must not cost an InsightFace call or produce duplicate records."""
-    import io, subprocess
+def test_portrait_scan_window_timestamps_are_absolute():
+    """Burst scans seek into the source; record timestamps must be source
+    seconds, not burst-relative, so diarisation lookups line up."""
+    import io
     from unittest import mock
-    import numpy as np
     import pipeline.portrait as P
     W, H = 32, 18
-    P_SCAN_W = P.SCAN_W
-    P.SCAN_W = W
+    saved = P.SCAN_W; P.SCAN_W = W
     try:
-        a = bytes([10]) * (W * H * 3); b = bytes([200]) * (W * H * 3)
-        stream = a + a + a + b + b            # 5 frames at 1 fps, only 2 distinct
+        stream = bytes([10]) * (W * H * 3) * 3
         fake_proc = mock.Mock(stdout=io.BytesIO(stream), wait=lambda timeout=None: 0)
         fake_app = mock.Mock(); fake_app.get = mock.Mock(return_value=[])
-        with mock.patch.object(P.subprocess, "Popen", return_value=fake_proc), \
+        with mock.patch.object(P.subprocess, "Popen", return_value=fake_proc) as popen, \
              mock.patch.object(P, "_get_face_app", return_value=fake_app):
-            recs = P._scan_source("x.mp4", W, H, [], fps=1.0, keyframes_only=True)
-            assert [r["t"] for r in recs] == [0.0, 3.0]         # timestamps still true to position
-            assert fake_app.get.call_count == 2
-            fake_app.get.reset_mock()
-            recs = P._scan_source("x.mp4", W, H, [], fps=1.0)   # default mode: every frame
-            fake_proc.stdout = io.BytesIO(stream)
-        with mock.patch.object(P.subprocess, "Popen", return_value=fake_proc), \
-             mock.patch.object(P, "_get_face_app", return_value=fake_app):
-            recs = P._scan_source("x.mp4", W, H, [], fps=1.0)
-            assert len(recs) == 5 and fake_app.get.call_count == 5
+            recs = P._scan_source("x.mp4", W, H, [(0, 999, "A")], fps=4.0, start=100.0, duration=0.75)
+        assert [r["t"] for r in recs] == [100.0, 100.25, 100.5]
+        cmd = popen.call_args[0][0]
+        assert cmd[cmd.index("-ss") + 1] == "100.000" and cmd[cmd.index("-t") + 1] == "0.750"
     finally:
-        P.SCAN_W = P_SCAN_W
+        P.SCAN_W = saved
+
+
+def test_portrait_mouth_activity_tracks_faces_and_windows():
+    """Activity = mean |Δ openness| over the trailing window along a face's
+    track. Faces are matched frame to frame by box overlap, so two people
+    keep separate histories."""
+    from pipeline.portrait import _mouth_activity, TALK_WINDOW_S
+    def face(x, mouth): return {"bbox": [x, 0, x + 100, 120], "cx": x + 50, "cy": 60, "fw": 100, "fh": 120, "mouth": mouth}
+    # left face: mouth oscillates (talking); right face: constant (listening)
+    recs = [{"t": i * 0.25, "active_speaker": None, "overlap": False,
+             "faces": [face(0, 0.05 + 0.03 * (i % 2)), face(500, 0.06)]} for i in range(8)]
+    _mouth_activity(recs)
+    assert recs[0]["faces"][0]["talk"] is None                 # one sample: unknown
+    assert abs(recs[7]["faces"][0]["talk"] - 0.03) < 1e-9       # |Δ| every frame = 0.03
+    assert recs[7]["faces"][1]["talk"] == 0.0                   # still mouth
+    # a face with no landmarks never gets a value
+    recs2 = [{"t": 0, "active_speaker": None, "overlap": False, "faces": [face(0, None)]},
+             {"t": 0.25, "active_speaker": None, "overlap": False, "faces": [face(0, None)]}]
+    _mouth_activity(recs2); assert recs2[1]["faces"][0]["talk"] is None
+    assert TALK_WINDOW_S > 0
+
+
+def test_portrait_bind_speakers_weights_by_mouth_movement():
+    """Two-shot the whole time (no single-face frames): binding must still
+    find the speaker, via whose mouth moves while the audio says they talk."""
+    import numpy as np
+    from pipeline.portrait import _bind_speakers, _cos_sim, TALK_MIN
+    nina, conor = np.zeros(4), np.zeros(4); nina[0] = 1; conor[1] = 1
+    def face(emb, talk): return {"embedding": emb.tolist(), "talk": talk, "fw": 100, "fh": 120}
+    recs = [{"t": i * 0.25, "overlap": False,
+             "faces": [face(conor, 0.002), face(nina, 0.02)]} for i in range(20)]   # Nina talking
+    bound = _bind_speakers(recs, [(0.0, 5.0, "SPEAKER_01")])
+    assert _cos_sim(bound["SPEAKER_01"], nina) > 0.9
+    # No measurable movement anywhere → old rule: only a lone face counts.
+    still = [{"t": i * 0.25, "overlap": False, "faces": [face(conor, 0.001), face(nina, 0.001)]} for i in range(20)]
+    assert _bind_speakers(still, [(0.0, 5.0, "SPEAKER_01")])["SPEAKER_01"] is None
+    alone = [{"t": i * 0.25, "overlap": False, "faces": [face(nina, None)]} for i in range(20)]
+    assert _cos_sim(_bind_speakers(alone, [(0.0, 5.0, "SPEAKER_01")])["SPEAKER_01"], nina) > 0.9
+    assert 0 < TALK_MIN < 0.02
+
+
+def test_portrait_no_hold_across_a_shot_change():
+    """Speaker A is confidently on screen, then the source hard-cuts to a
+    close-up of B at a completely different position. The old hold kept A's
+    crop coordinates over B's footage for a grace period — one frame of
+    empty backdrop. A blink (B briefly detected where A was) still holds."""
+    from pipeline.portrait import _build_timeline, SCAN_FPS
+    eA, eB = [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]
+    bound = {"SPEAKER_A": eA, "SPEAKER_B": eB}
+    def rec(i, faces): return {"t": i / SCAN_FPS, "active_speaker": "SPEAKER_A", "overlap": False, "faces": faces}
+    # 8 frames of A at x=600, then a hard cut: B alone, close-up, at x=1500 (no overlap)
+    records = [rec(i, [_face(600, 300, 300, 400, embedding=eA)]) for i in range(8)] + \
+              [rec(i, [_face(1500, 500, 700, 900, embedding=eB)]) for i in range(8, 16)]
+    tl = _build_timeline(records, [(0.0, 4.0, "SPEAKER_A")], 3840, 2160, 1032, 1836, speaker_faces=bound)
+    x_at = lambda t: next(k["x"] for seg in tl for k in seg["keyframes"] if abs(k["t"] - t) < 1e-6) if any(
+        abs(k["t"] - t) < 1e-6 for seg in tl for k in seg["keyframes"]) else None
+    # the first frame after the cut must already frame B (crop centre near 1500), not hold at A
+    first_after = [seg for seg in tl if seg["start"] <= 8 / SCAN_FPS < seg["end"]][0]
+    assert abs(first_after["crop"]["x"] + 1032 / 2 - 1500) < 200, first_after["crop"]
+    # ...whereas a one-frame blink of B at A's position in a stable shot is held
+    blink = [rec(i, [_face(600, 300, 300, 400, embedding=eA)]) for i in range(8)]
+    blink[5] = rec(5, [_face(620, 310, 300, 400, embedding=eB)])
+    tl2 = _build_timeline(blink, [(0.0, 2.0, "SPEAKER_A")], 3840, 2160, 1032, 1836, speaker_faces=bound)
+    assert len(tl2) == 1
+
+
+def test_portrait_no_diarisation_follows_the_moving_mouth():
+    from pipeline.portrait import _best_face_for_speaker, _build_timeline, SCAN_FPS
+    # End to end: two faces all along, no diarisation, no map. The bigger face
+    # is still; the smaller one talks. The sticky-face rule must yield.
+    eA, eB = [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]
+    recs = []
+    for i in range(24):
+        big   = {**_face(600, 300, 400, 500, embedding=eA), "mouth": 0.06}
+        small = {**_face(1500, 300, 260, 320, embedding=eB), "mouth": 0.05 + 0.03 * (i % 2)}
+        recs.append({"t": i / SCAN_FPS, "active_speaker": None, "overlap": False, "faces": [big, small]})
+    from pipeline.portrait import _mouth_activity; _mouth_activity(recs)
+    tl = _build_timeline(recs, [], 1920, 1080, 516, 918)
+    late = [seg for seg in tl if seg["end"] > 2.0]
+    assert late and all(seg["crop"]["x"] + 516 / 2 > 960 for seg in late), late   # follows the talker on the right
+    big_still = {"embedding": None, "talk": 0.001, "fw": 400, "fh": 500}
+    small_talking = {"embedding": None, "talk": 0.02, "fw": 200, "fh": 250}
+    assert _best_face_for_speaker([big_still, small_talking], None, {}) is small_talking
+    # nobody talking → largest, as before
+    small_still = {**small_talking, "talk": 0.001}
+    assert _best_face_for_speaker([big_still, small_still], None, {}) is big_still
+
+
+def test_portrait_burst_windows_spread_over_each_speaker():
+    from pipeline.portrait import _burst_windows, BIND_BURST_S
+    tl = [(i * 10.0, i * 10.0 + 4.0, "A" if i % 2 == 0 else "B") for i in range(100)] + [(2000.0, 2000.5, "C")]
+    w = _burst_windows(tl, per_speaker=5)
+    assert len(w) == 10 and all(d == BIND_BURST_S for _, d in w)
+    assert w == sorted(w)
+    assert all(not (2000.0 <= s <= 2001) for s, _ in w)          # C's 0.5 s segment is too short to sample
 
 
 def test_portrait_ema_snap_on_shot_change():

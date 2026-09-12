@@ -23,7 +23,7 @@ from pathlib import Path
 
 from sources import download_and_stitch_cuts
 from jobs.common import _build_diar_timeline, _remap_diar_timeline, speaker_faces_key
-from pipeline.portrait import cut_and_portrait, bind_speakers_from_source
+from pipeline.portrait import cut_and_portrait, bind_speakers_from_source, SPEAKER_FACES_VERSION
 from pipeline.subtitle import burn_subtitles
 from pipeline.clip_spec import build_clip_spec
 from storage.r2 import upload_file, download_file, public_url, upload_bytes, key_exists
@@ -230,9 +230,12 @@ def _load_speaker_faces(video: dict, diar_timeline: list) -> dict[str, list[floa
         try:
             download_file(key, local)
             with open(local) as f:
-                return json.load(f)
+                stored = json.load(f)
         finally:
             Path(local).unlink(missing_ok=True)
+        if stored.get("version") == SPEAKER_FACES_VERSION:
+            return stored
+        log.info("Stored speaker→face map for video %s is from an older method — rebuilding", video["id"])
 
     source_key = video.get("source_r2_key")
     if not source_key or not key_exists(source_key):
@@ -245,9 +248,10 @@ def _load_speaker_faces(video: dict, diar_timeline: list) -> dict[str, list[floa
         faces = bind_speakers_from_source(local, diar_timeline)
     finally:
         Path(local).unlink(missing_ok=True)
-    if faces:
+    if faces.get("speakers"):
         upload_bytes(json.dumps(faces).encode(), key, "application/json")
-    return faces or None
+        return faces
+    return None
 
 
 async def handle_edit_clip(job: dict) -> None:

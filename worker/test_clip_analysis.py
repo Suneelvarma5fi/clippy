@@ -43,7 +43,8 @@ def test_slim_drops_embeddings_keeps_geometry():
     assert len(slim) == 2
     face = slim[0]["faces"][0]
     assert "embedding" not in face, "embedding must be stripped from the artifact"
-    assert face == {"bbox": [100, 50, 300, 400], "cx": 200, "cy": 225, "fw": 200, "fh": 350}
+    assert face == {"bbox": [100, 50, 300, 400], "cx": 200, "cy": 225, "fw": 200, "fh": 350,
+                    "mouth": None, "talk": None}   # mouth fields ride along (None when unscanned)
     # speaker/overlap/time fields preserved
     assert slim[0]["active_speaker"] == "SPEAKER_00"
     assert slim[0]["overlap"] is False
