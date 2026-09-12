@@ -18,7 +18,7 @@ Paste a YouTube URL. Clippy transcribes it, finds the moments worth clipping, re
 ## Features
 
 - **AI clip finding** — a multi-stage LLM pipeline (scout → craft → rank) picks self-contained moments with a hook, not just loud bits. Clips can splice non-adjacent segments.
-- **Face-tracked reframing** — 9:16, 4:5, 1:1 or 16:9, with the crop following the active speaker.
+- **Face-tracked reframing** — landscape source to 9:16 portrait, with the crop following the active speaker.
 - **Captions** — six styles: four animated (Pill, Impact, Beast, Karaoke) rendered with HyperFrames, two static (Clean, Box). Word-level timing from WhisperX.
 - **Stickers & templates** — text and image (logo) overlays; save brand presets and apply them across clips.
 - **Two-phase rendering** — the expensive face-tracked cut is cached; restyling captions or stickers is a cheap second pass.
