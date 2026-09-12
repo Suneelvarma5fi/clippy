@@ -132,12 +132,7 @@ export function Menu({
           role="menu"
           aria-label={ariaLabel}
           onKeyDown={onKeyDown}
-          onClick={(e) => {
-            e.stopPropagation();
-            // Selecting an item closes the menu, unless it opts out (e.g. a submenu toggle).
-            const item = (e.target as HTMLElement).closest('[role="menuitem"]');
-            if (item && !item.hasAttribute("data-keep-open")) setOpen(false);
-          }}
+          onClick={(e) => onMenuPanelClick(e, () => setOpen(false))}
           style={{ width }}
           className={`absolute z-50 rounded-xl py-1 shadow-2xl ${
             align === "end" ? "right-0" : "left-0"
@@ -149,6 +144,23 @@ export function Menu({
       )}
     </div>
   );
+}
+
+/**
+ * Click anywhere in the open panel. Both calls matter: stopPropagation keeps
+ * it from React handlers up the tree, and preventDefault keeps the browser
+ * from following an enclosing <a> — a menu rendered inside a card link would
+ * otherwise navigate on every item click (the trigger already does both).
+ * Selecting an item closes the menu unless it opts out (e.g. a submenu toggle).
+ */
+export function onMenuPanelClick(
+  e: { preventDefault(): void; stopPropagation(): void; target: EventTarget | null },
+  close: () => void,
+) {
+  e.preventDefault();
+  e.stopPropagation();
+  const item = (e.target as HTMLElement | null)?.closest?.('[role="menuitem"]');
+  if (item && !item.hasAttribute("data-keep-open")) close();
 }
 
 interface MenuItemProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {

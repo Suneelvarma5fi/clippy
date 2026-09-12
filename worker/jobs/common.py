@@ -3,6 +3,11 @@
 from __future__ import annotations
 
 
+def speaker_faces_key(video_id: str) -> str:
+    """Storage key of the whole-video speaker→face map (see portrait.bind_speakers_from_source)."""
+    return f"sources/{video_id}/speaker_faces.json"
+
+
 def _build_diar_timeline(transcript: dict | None) -> list[tuple[float, float, str]]:
     """Extract [(start, end, speaker_id), ...] from a stored transcript's segments."""
     if not transcript:

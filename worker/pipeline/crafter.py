@@ -155,6 +155,44 @@ def _format_context(
     return "\n".join(lines)
 
 
+def _fallback_clip(
+    candidate: dict, sentences: list[dict], features: list[dict], reason: str,
+) -> dict[str, Any] | None:
+    """
+    A rejected candidate still becomes a clip — on the Scout's own [lo, hi]
+    span, labelled "weak" with the rejection reason — so nothing the Scout
+    flagged is silently lost. The user sees why the Crafter passed on it and
+    decides. Returns None only if the span itself is unusable.
+    """
+    resolved = _resolve_groups([[candidate["lo"], candidate["hi"]]], sentences, False)
+    if resolved is None:
+        log.info("Crafter: candidate %s dropped — scout span unusable", candidate["candidate_id"])
+        return None
+    groups, cuts_raw, text = resolved
+    duration = sum(c["end"] - c["start"] for c in cuts_raw)
+    log.info("Crafter: candidate %s kept as weak — %s", candidate["candidate_id"], reason)
+    return {
+        "archetype":       candidate["archetype"],
+        "scout_score":     candidate["score"],
+        "why":             candidate["why"],
+        "label":           "weak",
+        "score_total":     0,
+        "must_haves":      0,
+        "signals":         0,
+        "must_have_ticks": {k: False for k in MUST_HAVES},
+        "signal_ticks":    {k: False for k in SIGNALS},
+        "sentence_groups": groups,
+        "stitched":        False,
+        "transplant":      False,
+        "cuts_raw":        cuts_raw,
+        "duration_sec":    round(duration, 3),
+        "src_start":       min(c["start"] for c in cuts_raw),
+        "speaker":         _dominant_speaker(groups, features),
+        "text":            text,
+        "reasoning":       reason,
+    }
+
+
 async def _craft_one(
     candidate: dict,
     sentences: list[dict],
@@ -184,13 +222,14 @@ async def _craft_one(
             api_key=api_key, temperature=0.2, max_tokens=2048,
         )
     if not isinstance(data, dict) or not data.get("keep"):
-        return None
+        why = str((data or {}).get("reasoning") or "") if isinstance(data, dict) else ""
+        return _fallback_clip(candidate, sentences, features,
+                              "Crafter: doesn't stand alone without context" + (f" — {why}" if why else ""))
 
     transplant = bool(data.get("transplant"))
     resolved = _resolve_groups(data.get("sentence_groups"), sentences, transplant)
     if resolved is None:
-        log.info("Crafter: candidate %s dropped — invalid groups", candidate["candidate_id"])
-        return None
+        return _fallback_clip(candidate, sentences, features, "Crafter returned unusable boundaries")
     groups, cuts_raw, text = resolved
 
     mh_ticks  = {k: bool((data.get("must_haves") or {}).get(k)) for k in MUST_HAVES}
@@ -199,15 +238,13 @@ async def _craft_one(
 
     label = classify(mh_count, sig_count)
     if label is None:
-        log.info("Crafter: candidate %s dropped — only %d must-haves",
-                 candidate["candidate_id"], mh_count)
-        return None
+        return _fallback_clip(candidate, sentences, features,
+                              f"Crafter: only {mh_count} of {len(MUST_HAVES)} must-haves")
 
     duration = sum(c["end"] - c["start"] for c in cuts_raw)
     if not (gate_min <= duration <= gate_max):
-        log.info("Crafter: candidate %s dropped — %.1fs outside gate [%s, %s]",
-                 candidate["candidate_id"], duration, gate_min, gate_max)
-        return None
+        return _fallback_clip(candidate, sentences, features,
+                              f"Crafter: {duration:.1f}s is outside your {int(gate_min)}–{int(gate_max)}s range")
 
     # Transplant only counts when the play order actually differs from source order
     transplant = transplant and groups != sorted(groups)
@@ -243,7 +280,8 @@ async def craft_clips(
     min_duration_s: float | None = None,
     max_duration_s: float | None = None,
 ) -> list[dict[str, Any]]:
-    """Craft one clip per surviving candidate. Failures drop the candidate only."""
+    """Craft one clip per candidate. Rejections and failures become "weak" clips
+    on the Scout's span rather than disappearing — see _fallback_clip."""
     if not candidates:
         return []
     gate_min = max(min_duration_s or GATE_MIN_S, GATE_MIN_S)
@@ -262,7 +300,8 @@ async def craft_clips(
     for cand, result in zip(candidates, results):
         if isinstance(result, Exception):
             log.warning("Crafter failed for candidate %s: %s", cand["candidate_id"], result)
-        elif result is not None:
+            result = _fallback_clip(cand, sentences, features, "Crafter call failed")
+        if result is not None:
             clips.append(result)
 
     log.info("Crafter: %d candidates → %d clips (%d transplants)",

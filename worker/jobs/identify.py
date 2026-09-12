@@ -37,6 +37,19 @@ from db.supabase import (
 log = logging.getLogger(__name__)
 
 
+def _summary(refined: list[dict], runtime: float) -> str:
+    """One-line job result (spec §7). Every label the Crafter can emit is counted."""
+    counts = {"hero": 0, "strong": 0, "decent": 0, "weak": 0}
+    for c in refined:
+        counts[c.get("label") or "weak"] += 1
+    return (
+        f"Found {len(refined)} clips — {counts['hero']} hero, {counts['strong']} strong, "
+        f"{counts['decent']} decent, {counts['weak']} weak."
+        + (f" Top pick: Clip 1 · {refined[0]['hook_line']}." if refined else "")
+        + f" Runtime: {runtime:.0f}s."
+    )
+
+
 async def handle_identify_clips(job: dict) -> None:
     """
     Run the agent clip pipeline.
@@ -269,17 +282,7 @@ async def handle_identify_clips(job: dict) -> None:
 
         update_video(video_id, status="ready")
 
-        # Summary line (spec §7)
-        runtime = time.monotonic() - t0
-        label_counts = {"hero": 0, "strong": 0, "decent": 0}
-        for c in refined:
-            label_counts[c["label"]] += 1
-        summary = (
-            f"Found {len(refined)} clips — {label_counts['hero']} hero, "
-            f"{label_counts['strong']} strong, {label_counts['decent']} decent."
-            + (f" Top pick: Clip 1 · {refined[0]['hook_line']}." if refined else "")
-            + f" Runtime: {runtime:.0f}s."
-        )
+        summary = _summary(refined, time.monotonic() - t0)
         finish_job(
             job_id,
             status="done",

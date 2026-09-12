@@ -1,5 +1,5 @@
-import { describe, it, expect } from "vitest";
-import { nextMenuIndex } from "./menu";
+import { describe, it, expect, vi } from "vitest";
+import { nextMenuIndex, onMenuPanelClick } from "./menu";
 
 describe("nextMenuIndex", () => {
   it("returns null when there are no items", () => {
@@ -28,5 +28,35 @@ describe("nextMenuIndex", () => {
   it("ignores keys that do not move focus", () => {
     expect(nextMenuIndex(3, 0, "Enter")).toBeNull();
     expect(nextMenuIndex(3, 0, "a")).toBeNull();
+  });
+});
+
+describe("onMenuPanelClick", () => {
+  const item = (keepOpen: boolean) => ({
+    closest: (sel: string) => (sel === '[role="menuitem"]' ? { hasAttribute: (a: string) => keepOpen && a === "data-keep-open" } : null),
+  });
+  const ev = (target: unknown) => {
+    const e = { preventDefault: vi.fn(), stopPropagation: vi.fn(), target: target as EventTarget };
+    return e;
+  };
+
+  it("prevents the default action so a menu inside a link never navigates", () => {
+    const e = ev(item(false)); const close = vi.fn();
+    onMenuPanelClick(e, close);
+    expect(e.preventDefault).toHaveBeenCalledOnce();
+    expect(e.stopPropagation).toHaveBeenCalledOnce();
+  });
+
+  it("closes after selecting an item", () => {
+    const close = vi.fn();
+    onMenuPanelClick(ev(item(false)), close);
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it("stays open for keep-open items and for clicks on non-items", () => {
+    const close = vi.fn();
+    onMenuPanelClick(ev(item(true)), close);
+    onMenuPanelClick(ev({ closest: () => null }), close);
+    expect(close).not.toHaveBeenCalled();
   });
 });

@@ -349,18 +349,10 @@ class SubtitleRenderer:
 
     # ── private ───────────────────────────────────────────────────────────────
 
-    def _measure(self, draw: ImageDraw.ImageDraw, txt: str) -> tuple[int, int]:
-        """
-        Returns (advance_width, visual_height).
-
-        advance_width  — typographic advance: how far x moves after this word.
-                         Uses textlength() so words never merge or over-lap.
-        visual_height  — bounding-box height including stroke, used for line-height.
-        """
-        advance = max(1, int(draw.textlength(txt, font=self.font)))
-        bb      = draw.textbbox((0, 0), txt, font=self.font, stroke_width=self.stroke_w)
-        height  = max(1, bb[3] - bb[1])
-        return advance, height
+    def _advance(self, draw: ImageDraw.ImageDraw, txt: str) -> int:
+        """Typographic advance: how far x moves after this word. Uses
+        textlength() so words never merge or overlap."""
+        return max(1, int(draw.textlength(txt, font=self.font)))
 
     def _put_word(
         self,
@@ -419,18 +411,19 @@ class SubtitleRenderer:
 
         # Measure all lines using advance width (not bounding-box width).
         # self._space_w is the actual space-character advance for this font.
-        line_meta: list[tuple[list[str], list[int], int, int]] = []
+        # Per line: word advances, total width, and the line's ink box. PIL
+        # anchors draw.text at the font ascender, but the ink starts `top` px
+        # lower (ascender → cap height), so every line is drawn at y - top to
+        # put its ink exactly at y. One offset per line keeps a shared baseline.
+        line_meta: list[tuple[list[str], list[int], int, int, int]] = []
         for line in lines:
-            ws, hs = [], []
-            for w in line:
-                ww, wh = self._measure(draw, w)
-                ws.append(ww)
-                hs.append(wh)
+            ws = [self._advance(draw, w) for w in line]
             tw = sum(ws) + self._space_w * max(0, len(ws) - 1)
-            lh = max(hs, default=getattr(self.font, "size", None) or 40)
-            line_meta.append((line, ws, tw, lh))
+            bb = draw.textbbox((0, 0), " ".join(line), font=self.font, stroke_width=self.stroke_w)
+            top, lh = bb[1], max(1, bb[3] - bb[1])
+            line_meta.append((line, ws, tw, lh, top))
 
-        total_h = sum(lh for _, _, _, lh in line_meta) + LINE_GAP * (len(line_meta) - 1)
+        total_h = sum(lh for _, _, _, lh, _ in line_meta) + LINE_GAP * (len(line_meta) - 1)
 
         # Vertical anchor point — vertical_percent overrides vertical_position.
         # Mirrors the CSS `top: X%; transform: translateY(-50%)` logic in the preview.
@@ -448,7 +441,7 @@ class SubtitleRenderer:
 
         # Background box spanning all lines
         if self.bg_rgba[3] > 0:
-            max_tw = max(tw for _, _, tw, _ in line_meta)
+            max_tw = max(tw for _, _, tw, _, _ in line_meta)
             bx     = self._line_start_x(max_tw)
             bp     = self.padding // 2
             draw.rectangle(
@@ -459,11 +452,11 @@ class SubtitleRenderer:
         # Draw words line by line, advancing x by advance_width + one space
         word_idx = 0
         y = base_y
-        for line, widths, total_w, line_h in line_meta:
+        for line, widths, total_w, line_h, top in line_meta:
             x = self._line_start_x(total_w)
             for txt, ww in zip(line, widths):
                 color = self.hi_rgb if word_idx == active_idx else self.text_rgb
-                self._put_word(draw, (x, y), txt, color)
+                self._put_word(draw, (x, y - top), txt, color)
                 x += ww + self._space_w
                 word_idx += 1
             y += line_h + LINE_GAP

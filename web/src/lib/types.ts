@@ -94,7 +94,7 @@ export interface Clip {
   approved: boolean | null;          // null = not reviewed, true = approved, false = rejected
   series_id: string | null;          // group clips into a series
   thumbnail_url: string | null;      // face-forward frame extracted by worker
-  label?: "hero" | "strong" | "decent" | null;  // checklist classification (pipeline v2)
+  label?: "hero" | "strong" | "decent" | "weak" | null;  // checklist classification; "weak" = Crafter rejected it, see reasoning
   generation?: number;               // identify run number (keep-old-clips re-runs)
   created_at: string;
   updated_at: string;

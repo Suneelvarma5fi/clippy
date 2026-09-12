@@ -16,16 +16,17 @@ import asyncio
 import logging
 import os
 import subprocess
+import json
 import tempfile
 from datetime import datetime
 from pathlib import Path
 
 from sources import download_and_stitch_cuts
-from jobs.common import _build_diar_timeline, _remap_diar_timeline
-from pipeline.portrait import cut_and_portrait
+from jobs.common import _build_diar_timeline, _remap_diar_timeline, speaker_faces_key
+from pipeline.portrait import cut_and_portrait, bind_speakers_from_source
 from pipeline.subtitle import burn_subtitles
 from pipeline.clip_spec import build_clip_spec
-from storage.r2 import upload_file, download_file, public_url, upload_bytes
+from storage.r2 import upload_file, download_file, public_url, upload_bytes, key_exists
 from db.supabase import (
     update_job, finish_job, update_export, update_clip_edit,
     get_video, get_transcript, get_clip, get_preset, get_clip_edit,
@@ -213,6 +214,42 @@ async def _chain_style_clip(edit_job: dict, portrait_key: str) -> None:
     log.info("Auto-chained style_clip job %s for export %s", style_job["id"], p["export_id"])
 
 
+
+def _load_speaker_faces(video: dict, diar_timeline: list) -> dict[str, list[float]] | None:
+    """
+    The whole-video speaker→face map, generated at transcribe time. Videos
+    transcribed before that existed get it built here once from the stored
+    source and cached back, so nobody has to re-transcribe to get correct
+    face tracking. Returns None when there's nothing to bind against.
+    """
+    if not diar_timeline:
+        return None
+    key = speaker_faces_key(video["id"])
+    if key_exists(key):
+        local = tempfile.mktemp(suffix=".json")
+        try:
+            download_file(key, local)
+            with open(local) as f:
+                return json.load(f)
+        finally:
+            Path(local).unlink(missing_ok=True)
+
+    source_key = video.get("source_r2_key")
+    if not source_key or not key_exists(source_key):
+        log.warning("No speaker→face map and no stored source for video %s — binding per clip", video["id"])
+        return None
+    log.info("Building speaker→face map for video %s from the stored source (one-time)", video["id"])
+    local = tempfile.mktemp(suffix=".mp4")
+    try:
+        download_file(source_key, local)
+        faces = bind_speakers_from_source(local, diar_timeline)
+    finally:
+        Path(local).unlink(missing_ok=True)
+    if faces:
+        upload_bytes(json.dumps(faces).encode(), key, "application/json")
+    return faces or None
+
+
 async def handle_edit_clip(job: dict) -> None:
     """
     Edit stage (expensive, cached): download + stitch + face-tracked portrait →
@@ -250,6 +287,7 @@ async def handle_edit_clip(job: dict) -> None:
 
         remapped_diar  = _remap_diar_timeline(diar_timeline, cuts)
         total_duration = sum(float(c["end"]) - float(c["start"]) for c in cuts)
+        speaker_faces  = await asyncio.to_thread(_load_speaker_faces, video, diar_timeline)
 
         cut_local = tempfile.mktemp(suffix=".mp4")
         analysis_local = tempfile.mktemp(suffix=".json")
@@ -261,6 +299,7 @@ async def handle_edit_clip(job: dict) -> None:
                 cut_local,
                 diar_timeline=remapped_diar,
                 analysis_out_path=analysis_local,
+                speaker_faces=speaker_faces,
             )
 
         portrait_key = f"clip_edits/{edit_id}/portrait.mp4"

@@ -141,38 +141,47 @@ def test_unflagged_out_of_order_gets_sorted():
     assert not clips[0]["transplant"]
 
 
-def test_drops():
+def test_rejections_become_weak_clips_on_the_scout_span():
+    """Nothing the Scout flagged disappears: every Crafter rejection falls back
+    to a "weak" clip on the candidate's own [lo, hi] span, with the reason."""
     sents = _sentences(20)
     feats = _features(20)
     base = {
         "keep": True, "transplant": False, "sentence_groups": [[5, 9]],
         "must_haves": ALL_TRUE_MH, "signals": ALL_TRUE_SIG,
     }
-    # keep: false
-    clips, _ = _run([_candidate(5, 9)], sents, feats, {"keep": False})
-    assert clips == []
+    def weak_of(clips):
+        assert len(clips) == 1, clips
+        c = clips[0]
+        assert c["label"] == "weak" and c["score_total"] == 0 and not c["transplant"]
+        return c
+
+    # keep: false — cold-start test; the Crafter's reasoning is carried through
+    c = weak_of(_run([_candidate(5, 9)], sents, feats, {"keep": False, "reasoning": "needs the episode"})[0])
+    assert c["sentence_groups"] == [[5, 9]] and "needs the episode" in c["reasoning"]
     # under 3 must-haves
     weak_mh = {**ALL_TRUE_MH, "hook": False, "cold_start": False, "payoff": False}
-    clips, _ = _run([_candidate(5, 9)], sents, feats, {**base, "must_haves": weak_mh})
-    assert clips == []
-    # duration gate: single 5s sentence < 10s minimum
-    clips, _ = _run([_candidate(5, 5)], sents, feats, {**base, "sentence_groups": [[5, 5]]})
-    assert clips == []
-    # over max: 30 sentences ≈ 164s > 120s cap
-    long_sents = _sentences(40)
-    clips, _ = _run([_candidate(0, 35)], long_sents, _features(40),
-                    {**base, "sentence_groups": [[0, 29]]})
-    assert clips == []
-    # LLM exception drops only that candidate
+    c = weak_of(_run([_candidate(5, 9)], sents, feats, {**base, "must_haves": weak_mh})[0])
+    assert "must-haves" in c["reasoning"]
+    # duration gate — falls back to the scout span, not the crafter's cut
+    c = weak_of(_run([_candidate(5, 9)], sents, feats, {**base, "sentence_groups": [[5, 5]]})[0])
+    assert c["sentence_groups"] == [[5, 9]] and "outside" in c["reasoning"]
+    # malformed boundaries
+    c = weak_of(_run([_candidate(5, 9)], sents, feats, {**base, "sentence_groups": [[9, 5]]})[0])
+    assert "unusable" in c["reasoning"]
+    # LLM exception
     async def boom(*a, **kw):
         raise RuntimeError("down")
     orig = crafter.call_agent
     crafter.call_agent = boom
     try:
-        clips = asyncio.run(craft_clips([_candidate(5, 9)], sents, feats, {}, "key"))
+        c = weak_of(asyncio.run(craft_clips([_candidate(5, 9)], sents, feats, {}, "key")))
     finally:
         crafter.call_agent = orig
-    assert clips == []
+    assert "failed" in c["reasoning"]
+    # A good candidate is untouched by all of this
+    clips, _ = _run([_candidate(5, 9)], sents, feats, base)
+    assert len(clips) == 1 and clips[0]["label"] != "weak"
 
 
 def test_humor_can_reach_hero_without_learning():

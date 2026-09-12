@@ -18,6 +18,8 @@ import httpx
 from config import REPLICATE_API_TOKEN, HUGGINGFACE_TOKEN, WHISPERX_MODEL_SIZES
 from sources import ensure_source, ensure_audio
 from pipeline.clip_thumbnail import extract_face_from_image, extract_portrait_preview
+from pipeline.portrait import bind_speakers_from_source
+from jobs.common import _build_diar_timeline, speaker_faces_key
 from storage.r2 import upload_bytes, public_url, get_presigned_url
 from db.supabase import (
     update_job, finish_job, update_video, get_video,
@@ -272,6 +274,22 @@ async def handle_transcribe(job: dict) -> None:
                 "replicate_id": pred_id,
                 "model_size":   model_size,
             })
+
+            # Speaker → face map over the whole source, for the export's face
+            # tracker. Learning it from a 30 s clip is fooled by every reaction
+            # cutaway; over the full episode the real speaker wins. Source is
+            # already local here, so this is the cheap moment to do it.
+            try:
+                diar_tl = _build_diar_timeline(transcript)
+                if diar_tl:
+                    faces = await asyncio.to_thread(bind_speakers_from_source, source_local, diar_tl)
+                    if faces:
+                        await asyncio.to_thread(
+                            upload_bytes, json.dumps(faces).encode(),
+                            speaker_faces_key(video_id), "application/json",
+                        )
+            except Exception as _be:
+                log.warning("Speaker→face binding failed (non-fatal, exports bind per clip): %s", _be)
 
             finish_job(
                 job_id,

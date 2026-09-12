@@ -191,11 +191,18 @@ def _scan_source(
     src_w: int,
     src_h: int,
     diar_timeline: list,
+    fps: float = SCAN_FPS,
+    keyframes_only: bool = False,
 ) -> list[dict]:
     """
-    Pipe the entire source at SCAN_FPS and run InsightFace on every frame.
+    Pipe the entire source at `fps` and run InsightFace on every frame.
     Returns per-frame records: [{t, active_speaker, overlap, faces: [...]}].
     All coordinates are in original source resolution.
+
+    keyframes_only decodes just the I-frames (an order of magnitude cheaper on
+    a long 4K source) and skips frames identical to the previous one, so the
+    fps filter's hold-frames don't cost InsightFace time. Good enough for
+    learning who's who; not for per-frame tracking.
     """
     scale  = SCAN_W / src_w
     scan_h = int(src_h * scale)
@@ -204,8 +211,8 @@ def _scan_source(
     face_app = _get_face_app()
 
     cmd = [
-        "ffmpeg", "-i", source,
-        "-vf", f"scale={SCAN_W}:{scan_h},fps={SCAN_FPS}",
+        "ffmpeg", *(["-skip_frame", "nokey"] if keyframes_only else []), "-i", source,
+        "-vf", f"scale={SCAN_W}:{scan_h},fps={fps}",
         "-f", "rawvideo", "-pix_fmt", "bgr24", "-an", "pipe:1",
     ]
     proc  = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
@@ -213,13 +220,19 @@ def _scan_source(
 
     records: list[dict] = []
     frame_idx = 0
+    prev_raw: bytes | None = None
     try:
         while True:
             raw = proc.stdout.read(fsize)
             if len(raw) < fsize:
                 break
+            t = frame_idx / fps
+            frame_idx += 1
+            if keyframes_only:
+                if raw == prev_raw:
+                    continue          # fps filter held the same keyframe — nothing new to learn
+                prev_raw = raw
             frame = np.frombuffer(raw, dtype=np.uint8).reshape(scan_h, SCAN_W, 3)
-            t     = frame_idx / SCAN_FPS
 
             # InsightFace expects BGR (cv2 convention) — frame is already bgr24
             detected = face_app.get(frame)
@@ -245,7 +258,6 @@ def _scan_source(
                 "overlap":        overlap,
                 "faces":          faces_out,
             })
-            frame_idx += 1
 
         # EOF on stdout — a short read can also mean ffmpeg died mid-file.
         # Surface that instead of silently returning a truncated scan.
@@ -303,6 +315,56 @@ def _bind_speakers(
     for speaker, total in sums.items():
         bound[speaker] = total / counts[speaker]
     return bound
+
+
+BIND_SCAN_FPS = 1.0   # keyframe-only pass over the whole source for speaker→face binding
+
+
+def bind_speakers_from_source(
+    source_path: str, diar_timeline: list,
+) -> dict[str, list[float]]:
+    """
+    Learn which face belongs to each diarised speaker from the WHOLE source.
+
+    Binding from a single clip is fooled by the first reaction shot: the
+    editor cuts to the listener while the speaker talks, and the only
+    single-face frames in a 30 s clip are exactly those cutaways. Over a
+    full episode the speaker's own shots outnumber the cutaways, so the mean
+    embedding lands on the right person. Runs once per video (transcribe
+    time, source already local); the result is stored beside the source and
+    fed to every export via `speaker_faces`.
+
+    Returns {speaker_id: 512-d embedding as a list} for speakers that got a
+    binding; JSON-serialisable.
+    """
+    _, src_w, src_h = _video_meta(source_path)
+    records = _scan_source(source_path, src_w, src_h, diar_timeline,
+                           fps=BIND_SCAN_FPS, keyframes_only=True)
+    bound = _bind_speakers(records, diar_timeline)
+    out = {spk: vec.tolist() for spk, vec in bound.items() if vec is not None}
+
+    # Two speakers bound to the same face means the cutaways won anyway.
+    ids = sorted(out)
+    for i, a in enumerate(ids):
+        for b in ids[i + 1:]:
+            sim = _cos_sim(np.array(out[a]), np.array(out[b]))
+            if sim > 0.8:
+                log.warning("Speaker binding ambiguous: %s and %s map to the same face (cos %.2f)", a, b, sim)
+    log.info("Speaker→face binding from %d scanned frames: %s", len(records),
+             {k: "bound" for k in out} or "none")
+    return out
+
+
+def _merge_bindings(
+    local: dict[str, np.ndarray | None], preloaded: dict[str, list[float]] | None,
+) -> dict[str, np.ndarray | None]:
+    """Whole-video bindings override clip-local ones; local fills any gaps."""
+    if not preloaded:
+        return local
+    merged = dict(local)
+    for spk, vec in preloaded.items():
+        merged[spk] = np.array(vec, dtype=float)
+    return merged
 
 
 # ── Crop geometry ─────────────────────────────────────────────────────────────
@@ -499,18 +561,50 @@ def _main_cast(records: list[dict]) -> list[np.ndarray]:
     return [c[0] / c[1] for c in cast] if len(cast) >= 2 else []
 
 
+IDENT_SIM = 0.45   # cosine similarity at which a face is confidently a bound speaker
+
+
+def _identify(face: dict, bound: dict) -> tuple[str | None, float]:
+    """
+    Which bound speaker this face is, if any: (speaker, sim) when the best
+    match clears IDENT_SIM, else (None, best_sim). A near-profile or blurred
+    face typically matches nobody — that means "unknown", not "not them".
+    """
+    emb = face.get("embedding")
+    sims = {sp: _cos_sim(np.array(emb), ref) for sp, ref in bound.items() if ref is not None} if emb else {}
+    if not sims:
+        return None, -1.0
+    sp = max(sims, key=sims.get)
+    return (sp if sims[sp] >= IDENT_SIM else None), sims[sp]
+
+
 def _best_face_for_speaker(
     faces: list[dict],
     speaker: str | None,
     bound: dict,
 ) -> dict:
+    """
+    The face to follow for `speaker`. Identity is checked against EVERY bound
+    speaker, not just the active one: a face that confidently belongs to
+    someone else is ruled out even if it happens to resemble the speaker more
+    than an unrecognisable one does. Preference order —
+      1. confidently the speaker (highest sim first)
+      2. unidentified (largest first) — a profile view of the speaker looks like this
+      3. confidently another speaker (last resort, so a solo shot still tracks)
+    """
     ref = bound.get(speaker) if speaker else None
-    if ref is not None:
-        return max(
-            faces,
-            key=lambda f: _cos_sim(np.array(f["embedding"]), ref) if f["embedding"] else -1.0,
-        )
-    return max(faces, key=lambda f: f["fw"] * f["fh"])
+    if ref is None:
+        return max(faces, key=lambda f: f["fw"] * f["fh"])
+
+    def rank(f: dict) -> tuple[int, float]:
+        who, sim = _identify(f, bound)
+        if who == speaker:
+            return (2, sim)
+        if who is None:
+            return (1, float(f["fw"] * f["fh"]))
+        return (0, sim)
+
+    return max(faces, key=rank)
 
 
 def _build_timeline(
@@ -520,12 +614,13 @@ def _build_timeline(
     src_h: int,
     crop_w: int,
     crop_h: int,
+    speaker_faces: dict[str, list[float]] | None = None,
 ) -> list[dict]:
     """
     Converts per-frame records into timeline segments [{start, end, mode, crop, crops}].
     Applies hysteresis and merges short segments.
     """
-    bound = _bind_speakers(records, diar_timeline)
+    bound = _merge_bindings(_bind_speakers(records, diar_timeline), speaker_faces)
     cast  = _main_cast(records)
 
     # Panel dimensions for split mode: each face gets a 9:8 crop → scales to 1080×960
@@ -646,12 +741,21 @@ def _build_timeline(
         split_top_emb, split_swap_since = None, None
         last_two, split_run = None, 0
         ref = bound.get(current_speaker or active)
-        # If the detected face is NOT the speaker we're following (their face
-        # dropped out for a frame and another one got picked up), treat it as
-        # a detection miss and hold — no 250ms cuts to the wrong person.
-        if (ref is not None and best.get("embedding")
-                and _cos_sim(np.array(best["embedding"]), ref) < 0.4
-                and last_face is not None and single_run >= 2
+        # If we were confidently on the speaker and this frame's best face
+        # isn't them (their face dropped out and another got picked up), treat
+        # it as a detection miss and hold — no 250ms cuts to the wrong person.
+        # But never hold a crop that was itself someone else: that's how a
+        # listener's cutaway pinned the whole clip on the listener while the
+        # speaker sat in profile, unrecognised, one face over.
+        following = current_speaker or active
+        leaving_speaker_for_other = (
+            ref is not None and best.get("embedding") is not None
+            and _identify(best, bound)[0] != following
+            and last_face is not None and last_face.get("embedding") is not None
+            and _identify(last_face, bound)[0] == following
+        )
+        if (leaving_speaker_for_other
+                and single_run >= 2
                 and t - last_face_t <= FACE_GRACE_S):
             per_frame.append((t, "single", last_face, None))
             continue
@@ -774,7 +878,7 @@ def _build_timeline(
 
 # ── Pass 1 entry point (with cache) ───────────────────────────────────────────
 
-_CACHE_VERSION = 5  # bump when algorithm changes to invalidate stale caches
+_CACHE_VERSION = 6  # bump when algorithm changes to invalidate stale caches
 
 def _cache_path(source: str) -> str:
     return source + ".portrait_timeline.json"
@@ -858,6 +962,7 @@ def _analyze_source(
     crop_h: int,
     diar_timeline: list | None = None,
     analysis_out_path: str | None = None,
+    speaker_faces: dict[str, list[float]] | None = None,
 ) -> list[dict]:
     """
     Run Pass 1 with JSON cache. Returns timeline segments.
@@ -900,7 +1005,7 @@ def _analyze_source(
     log_rss("portrait pre-scan")
     records  = _scan_source(source, src_w, src_h, diar)
     log_rss(f"portrait scan done ({len(records)} records)")
-    timeline = _build_timeline(records, diar, src_w, src_h, crop_w, crop_h)
+    timeline = _build_timeline(records, diar, src_w, src_h, crop_w, crop_h, speaker_faces=speaker_faces)
     slim     = _slim_records(records)
     log_rss("portrait timeline+slim done")
 
@@ -1079,6 +1184,7 @@ def cut_and_portrait(
     face_track: bool = True,
     diar_timeline: list | None = None,
     analysis_out_path: str | None = None,
+    speaker_faces: dict[str, list[float]] | None = None,
 ) -> None:
     fps, src_w, src_h = _video_meta(source_path)
     crop_h = (int(src_h * PORTRAIT_FILL) // 2) * 2
@@ -1107,7 +1213,8 @@ def cut_and_portrait(
         return
 
     timeline = _analyze_source(source_path, fps, src_w, src_h, crop_w, crop_h,
-                               diar_timeline=diar_timeline, analysis_out_path=analysis_out_path)
+                               diar_timeline=diar_timeline, analysis_out_path=analysis_out_path,
+                               speaker_faces=speaker_faces)
 
     if len(cuts) == 1:
         _render_cut(source_path, cuts[0], timeline, output_path)

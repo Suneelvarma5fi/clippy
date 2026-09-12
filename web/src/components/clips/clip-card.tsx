@@ -255,6 +255,16 @@ export function ClipCard({ clip, videoId, selected, onToggleSelect }: Props) {
                   <History className="w-3.5 h-3.5" />
                 </button>
               )}
+              {clip.label === "weak" && (
+                // The Crafter passed on this one; it's kept on the Scout's span so the
+                // user can judge. The reason is one hover away.
+                <span
+                  className="text-xs px-2 py-0.5 rounded-full font-medium bg-orange-950 text-orange-400 cursor-help"
+                  title={clip.reasoning ?? "The clip crafter passed on this moment"}
+                >
+                  weak
+                </span>
+              )}
               {clip.tone && (
                 <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${TONE_COLORS[clip.tone] ?? "bg-[var(--yt-surface-2)] text-[var(--yt-text-2)]"}`}>
                   {clip.tone}

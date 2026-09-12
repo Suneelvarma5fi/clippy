@@ -121,6 +121,28 @@ def test_subtitle_hex_colours():
     assert _hex_rgba("#FFFFFF", 2.0)[3] == 255    # opacity clamped
 
 
+def test_subtitle_box_text_is_vertically_centred():
+    """Regression: PIL anchors text at the ascender, so ink used to sit low in
+    the background box. Measure the gaps rather than pixels so any font passes."""
+    import numpy as np
+    from PIL import Image
+    from pipeline.subtitle import SubtitleRenderer
+    cfg = {"typography": {"font_size": 64, "all_caps": True},
+           "color": {"text_color": "#ffffff", "highlight_color": "#ffffff", "bg_color": "#0000ff", "bg_opacity": 1.0},
+           "layout": {"vertical_percent": 50, "padding": 24}}
+    words = [{"text": w, "start": 0, "end": 1} for w in ["three", "orbs", "trailed", "our", "plane"]]
+    for two_lines in (False, True):
+        cfg["layout"]["two_lines"] = two_lines
+        out = np.array(SubtitleRenderer(cfg, 1080, 1920).draw_frame(
+            Image.new("RGB", (1080, 1920), (0, 0, 0)), {"start": 0, "end": 1, "words": words}, active_idx=0))
+        box = np.where((out[:, :, 2] > 200) & (out[:, :, 0] < 60))
+        ink = np.where((out[:, :, 0] > 200) & (out[:, :, 1] > 200) & (out[:, :, 2] > 200))
+        above = ink[0].min() - box[0].min()
+        below = box[0].max() - ink[0].max()
+        assert above > 0 and below > 0, "ink must sit inside the box"
+        assert abs(above - below) <= 3, f"two_lines={two_lines}: {above}px above vs {below}px below"
+
+
 def test_subtitle_renderer_draw_frame():
     from pipeline.subtitle import SubtitleRenderer
     from PIL import Image
@@ -251,6 +273,121 @@ def test_portrait_speaker_sweep():
     a = np.array([1.0, 0.0]); b = np.array([0.0, 1.0])
     assert _cos_sim(a, a) == 1.0 and _cos_sim(a, b) == 0.0
     assert _cos_sim(a, np.zeros(2)) == 0.0       # zero norm → 0, not NaN
+
+
+def test_identify_summary_counts_every_label():
+    """Regression: the summary used a fixed hero/strong/decent dict and raised
+    KeyError('weak') AFTER the clips were saved, marking a successful job failed."""
+    from jobs.identify import _summary
+    refined = [{"label": "hero", "hook_line": "H"}, {"label": "weak"}, {"label": "weak"}, {"label": None}]
+    out = _summary(refined, 12.4)
+    assert "Found 4 clips — 1 hero, 0 strong, 0 decent, 3 weak." in out
+    assert "Top pick: Clip 1 · H." in out and "Runtime: 12s." in out
+    assert _summary([], 1.0).startswith("Found 0 clips")
+
+
+def test_portrait_binding_majority_beats_one_cutaway():
+    """The reaction-shot failure: a clip's only single-face frames while the
+    speaker talks are a cutaway to the listener. Over a whole episode the
+    speaker's own shots outnumber it, so the mean embedding lands on them."""
+    import numpy as np
+    from pipeline.portrait import _bind_speakers, _cos_sim
+    nina, conor = np.zeros(8), np.zeros(8); nina[0] = 1.0; conor[1] = 1.0
+    def rec(t, face): return {"t": t, "overlap": False, "faces": [{"embedding": face.tolist()}]}
+    # SPEAKER_01 (Nina) talks 0–20s. Frames 0–2 s are a cutaway to Conor; 3–20 s show Nina.
+    records = [rec(t, conor) for t in (0.0, 1.0, 2.0)] + [rec(float(t), nina) for t in range(3, 20)]
+    bound = _bind_speakers(records, [(0.0, 20.0, "SPEAKER_01")])
+    assert _cos_sim(bound["SPEAKER_01"], nina) > _cos_sim(bound["SPEAKER_01"], conor)
+    # ...whereas a 3-second "clip" that contains only the cutaway binds the wrong face.
+    bound_clip = _bind_speakers(records[:3], [(0.0, 3.0, "SPEAKER_01")])
+    assert _cos_sim(bound_clip["SPEAKER_01"], conor) > _cos_sim(bound_clip["SPEAKER_01"], nina)
+
+
+def test_portrait_best_face_excludes_faces_identified_as_someone_else():
+    """The two-shot failure, with the real numbers from the probe: the listener
+    matches SPEAKER_02 at 0.73 and the active SPEAKER_01 at 0.38; the speaker
+    is in profile and matches nobody (0.09). Old rule picked the listener."""
+    import numpy as np
+    from pipeline.portrait import _best_face_for_speaker, _identify, IDENT_SIM
+    nina_ref  = np.array([1.0, 0.0, 0.0]); conor_ref = np.array([0.0, 1.0, 0.0])
+    bound = {"SPEAKER_01": nina_ref, "SPEAKER_02": conor_ref}
+    # Conor on screen: 0.73 to his own ref, 0.38 to Nina's.
+    conor = {"embedding": [0.38, 0.73, 0.0], "fw": 360, "fh": 500}
+    # Nina in profile: ~0.09 to everyone.
+    nina_profile = {"embedding": [0.09, 0.09, 0.99], "fw": 300, "fh": 440}
+    assert _identify(conor, bound)[0] == "SPEAKER_02"
+    assert _identify(nina_profile, bound)[0] is None
+    # Nina is speaking → follow the unidentified face, not the one that's confidently Conor.
+    assert _best_face_for_speaker([conor, nina_profile], "SPEAKER_01", bound) is nina_profile
+    # Conor is speaking → his face, even though the other is bigger... (make it bigger)
+    big_unknown = {**nina_profile, "fw": 900, "fh": 900}
+    assert _best_face_for_speaker([conor, big_unknown], "SPEAKER_02", bound) is conor
+    # Only someone-else on screen (a solo cutaway) → still tracks that one face.
+    assert _best_face_for_speaker([conor], "SPEAKER_01", bound) is conor
+    # No binding for the speaker → biggest face, as before.
+    assert _best_face_for_speaker([conor, big_unknown], "SPEAKER_09", bound) is big_unknown
+    assert 0 < IDENT_SIM < 1
+
+
+def test_portrait_two_shot_follows_speaker_in_profile():
+    """End to end through _build_timeline: a two-shot where the speaker sits on
+    the right in profile (matches nobody) and the listener on the left is a
+    confident match to another speaker. The crop must follow the right face.
+    Before the fix the clip tracked the listener start to finish."""
+    from pipeline.portrait import _build_timeline, SCAN_FPS
+    conor = [0.38, 0.73, 0.0]         # 0.73 to SPEAKER_02, 0.38 to SPEAKER_01 (unit refs below)
+    nina_profile = [0.09, 0.09, 0.99]
+    speaker_faces = {"SPEAKER_01": [1.0, 0.0, 0.0], "SPEAKER_02": [0.0, 1.0, 0.0]}
+    records = [{"t": i / SCAN_FPS, "active_speaker": "SPEAKER_01", "overlap": False,
+                "faces": [_face(600, 300, embedding=conor), _face(1500, 280, embedding=nina_profile)]}
+               for i in range(24)]
+    tl = _build_timeline(records, [(0.0, 6.0, "SPEAKER_01")], 1920, 1080, 516, 918,
+                         speaker_faces=speaker_faces)
+    assert len(tl) == 1 and tl[0]["mode"] == "single"
+    assert all(kf["x"] > 960 for kf in tl[0]["keyframes"]), tl[0]["keyframes"][:3]   # right half = Nina
+
+
+def test_portrait_merge_bindings_prefers_whole_video_map():
+    import numpy as np
+    from pipeline.portrait import _merge_bindings
+    local = {"SPEAKER_01": np.array([0.0, 1.0]), "SPEAKER_02": np.array([1.0, 0.0]), "SPEAKER_03": None}
+    merged = _merge_bindings(local, {"SPEAKER_01": [1.0, 0.0], "SPEAKER_09": [0.5, 0.5]})
+    assert merged["SPEAKER_01"].tolist() == [1.0, 0.0]      # whole-video wins
+    assert merged["SPEAKER_02"].tolist() == [1.0, 0.0]      # local fills the gap
+    assert merged["SPEAKER_03"] is None
+    assert merged["SPEAKER_09"].tolist() == [0.5, 0.5]
+    assert _merge_bindings(local, None) is local
+
+
+def test_portrait_keyframe_scan_skips_held_frames():
+    """With keyframes_only the fps filter repeats each keyframe; identical raw
+    frames must not cost an InsightFace call or produce duplicate records."""
+    import io, subprocess
+    from unittest import mock
+    import numpy as np
+    import pipeline.portrait as P
+    W, H = 32, 18
+    P_SCAN_W = P.SCAN_W
+    P.SCAN_W = W
+    try:
+        a = bytes([10]) * (W * H * 3); b = bytes([200]) * (W * H * 3)
+        stream = a + a + a + b + b            # 5 frames at 1 fps, only 2 distinct
+        fake_proc = mock.Mock(stdout=io.BytesIO(stream), wait=lambda timeout=None: 0)
+        fake_app = mock.Mock(); fake_app.get = mock.Mock(return_value=[])
+        with mock.patch.object(P.subprocess, "Popen", return_value=fake_proc), \
+             mock.patch.object(P, "_get_face_app", return_value=fake_app):
+            recs = P._scan_source("x.mp4", W, H, [], fps=1.0, keyframes_only=True)
+            assert [r["t"] for r in recs] == [0.0, 3.0]         # timestamps still true to position
+            assert fake_app.get.call_count == 2
+            fake_app.get.reset_mock()
+            recs = P._scan_source("x.mp4", W, H, [], fps=1.0)   # default mode: every frame
+            fake_proc.stdout = io.BytesIO(stream)
+        with mock.patch.object(P.subprocess, "Popen", return_value=fake_proc), \
+             mock.patch.object(P, "_get_face_app", return_value=fake_app):
+            recs = P._scan_source("x.mp4", W, H, [], fps=1.0)
+            assert len(recs) == 5 and fake_app.get.call_count == 5
+    finally:
+        P.SCAN_W = P_SCAN_W
 
 
 def test_portrait_ema_snap_on_shot_change():

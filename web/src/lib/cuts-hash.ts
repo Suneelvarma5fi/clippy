@@ -5,7 +5,7 @@ import type { Cut } from "@/lib/types";
  * Bump when the worker's portrait / face-tracking algorithm changes in a way
  * that should invalidate every cached edit. Mirrors the worker — keep in sync.
  */
-export const FACE_TRACK_VERSION = "1";
+export const FACE_TRACK_VERSION = "3";  // 3: whole-video speaker→face map + identity exclusion when picking the face
 
 /**
  * Fingerprint of a clip's cuts + the face-track version. This is the cache key
